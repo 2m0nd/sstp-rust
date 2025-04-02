@@ -1,6 +1,10 @@
 [package]
 name = "sstp-rust"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-rustls = "0.24"
+rustls = "0.21"
+webpki-roots = "0.25"
