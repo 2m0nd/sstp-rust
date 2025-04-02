@@ -1,3 +1,8 @@
+mod sstp;
+mod ssl_verifiers;
+use sstp::build_sstp_hello;
+use ssl_verifiers::DisabledVerifier;
+
 use std::sync::Arc;
 use tokio::{net::TcpStream, io::{AsyncReadExt, AsyncWriteExt}};
 use tokio_rustls::TlsConnector;
@@ -36,21 +41,4 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("{:02X?}", &buf[..n]);
 
     Ok(())
-}
-
-// 🔧 Простая заглушка, отключающая проверку сертификатов
-struct DisabledVerifier;
-
-impl ServerCertVerifier for DisabledVerifier {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &Certificate,
-        _intermediates: &[Certificate],
-        _server_name: &ServerName,
-        _scts: &mut dyn Iterator<Item = &[u8]>,
-        _ocsp_response: &[u8],
-        _now: std::time::SystemTime,
-    ) -> Result<ServerCertVerified, TLSError> {
-        Ok(ServerCertVerified::assertion())
-    }
 }
