@@ -352,29 +352,53 @@ pub fn build_lcp_configure_ack(id: u8, payload: &[u8]) -> Vec<u8> {
     buf
 }
 
-pub fn wrap_lcp_packet(code: u8, id: u8, data: &[u8]) -> Vec<u8> {
-    let mut payload = Vec::new();
+/// Оборачивает LCP payload в PPP + SSTP Data пакет
+pub fn wrap_lcp_packet(code: u8, id: u8, payload: &[u8]) -> Vec<u8> {
+    let mut ppp = Vec::new();
+
+    // ===== PPP Header =====
+    ppp.extend_from_slice(&[0xFF, 0x03]);       // Address + Control
+    ppp.extend_from_slice(&[0xC0, 0x21]);       // Protocol: LCP (0xC021)
+
+    // ===== LCP Frame =====
+    let lcp_length = (4 + payload.len()) as u16;
+    ppp.push(code);                             // LCP Code (e.g., 0x02 = Ack)
+    ppp.push(id);                               // Identifier
+    ppp.extend_from_slice(&lcp_length.to_be_bytes()); // Length
+    ppp.extend_from_slice(payload);             // Options / payload
+
+    // ===== SSTP Header =====
+    let total_len = (ppp.len() + 4) as u16;     // PPP + SSTP header
+    let mut sstp = Vec::new();
+    sstp.push(0x10);                            // SSTP Version 1.0
+    sstp.push(0x00);                            // C = 0 (Data)
+    sstp.extend_from_slice(&total_len.to_be_bytes()); // Length
+    sstp.extend_from_slice(&ppp);               // Вставляем весь PPP-фрейм
+
+    sstp
+}
+
+pub fn build_sstp_packet_from_ppp(code: u8, ppp: &PppParsedFrame) -> Vec<u8> {
+    let mut ppp_frame = Vec::new();
 
     // PPP Header
-    payload.push(0xFF); // Address
-    payload.push(0x03); // Control
-    payload.push(0xC0); // Protocol (LCP)
-    payload.push(0x21);
+    ppp_frame.extend_from_slice(&[0xFF, 0x03]);           // Address + Control
+    ppp_frame.extend_from_slice(&ppp.protocol.to_be_bytes()); // e.g. 0xC021 for LCP
 
-    // LCP Frame
-    payload.push(code);      // Code (e.g. Configure-Ack)
-    payload.push(id);        // Identifier
-    let total_len = (4 + data.len()) as u16;
-    payload.extend_from_slice(&total_len.to_be_bytes());
-    payload.extend_from_slice(data);
+    // LCP или другой PPP фрейм
+    let lcp_length = (4 + ppp.payload.len()) as u16;
+    ppp_frame.push(code);                     // e.g. 0x02 = Configure-Ack
+    ppp_frame.push(ppp.id);                   // тот же ID, что и в запросе
+    ppp_frame.extend_from_slice(&lcp_length.to_be_bytes());
+    ppp_frame.extend_from_slice(&ppp.payload); // Только опции
 
     // SSTP Header
-    let mut sstp = Vec::new();
-    sstp.push(0x10); // Version 1.0
-    sstp.push(0x00); // C = 0 (Data)
-    let sstp_len = (payload.len() + 4) as u16;
-    sstp.extend_from_slice(&sstp_len.to_be_bytes());
+    let total_len = (4 + ppp_frame.len()) as u16;
+    let mut sstp_packet = Vec::new();
+    sstp_packet.push(0x10);                   // Version 1.0
+    sstp_packet.push(0x00);                   // C = 0 (Data packet)
+    sstp_packet.extend_from_slice(&total_len.to_be_bytes());
+    sstp_packet.extend_from_slice(&ppp_frame);
 
-    sstp.extend_from_slice(&payload);
-    sstp
+    sstp_packet
 }

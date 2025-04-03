@@ -4,6 +4,7 @@ mod ssl_verifiers;
 use sstp::{
     wrap_lcp_packet,
     build_lcp_configure_ack,
+    build_sstp_packet_from_ppp,
     is_chap_challenge,
     is_lcp_configure_request,
     build_sstp_hello,
@@ -102,15 +103,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(ppp) = parse_sstp_data_packet(&buf[..n]) {
             if ppp.protocol == 0xC021 && ppp.code == 0x01 {
                 println!("🔧 Получен LCP Configure-Request от сервера (ID = {})", ppp.id);
-
-                // 👉 Формируем Configure-Ack с теми же опциями, что пришли
-                let ack = build_lcp_configure_ack(ppp.id, &ppp.payload);
-
-                // Оборачиваем в PPP + SSTP и отправляем
-                let packet = wrap_lcp_packet(0x02, ppp.id, &ack); // Code 0x02 = Configure-Ack
-                stream.write_all(&packet).await?;
+                let ack_packet = build_sstp_packet_from_ppp(0x02, &ppp); // Configure-Ack
+                stream.write_all(&ack_packet).await?;
+                let ack_len = ack_packet.len();
                 println!("✅ Отправлен Configure-Ack на LCP ({} байт): {:02X?}", 
-                        packet.len(), &packet[..packet.len()]);
+                        ack_len, &ack_packet[..ack_len]);
             }
         }
     }
