@@ -1,14 +1,19 @@
 mod sstp;
+use std::io;
+use std::io::Read;
+use std::io::Write;
+use anyhow::Result;
 mod parser;
 mod ssl_verifiers;
 use crate::sstp::*;
 use crate::parser::*;
 use ssl_verifiers::DisabledVerifier;
 use uuid::Uuid;
-use tokio::time::{sleep, Duration};
-
-use std::net::IpAddr;
+use tun::{create, Configuration, platform::Device};
+use tokio::io::{AsyncRead, AsyncWrite};
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::net::IpAddr;
 use tokio::{net::TcpStream, io::{AsyncReadExt, AsyncWriteExt}};
 use tokio_rustls::TlsConnector;
 use tokio_rustls::rustls::{
@@ -16,6 +21,16 @@ use tokio_rustls::rustls::{
     client::ServerCertVerifier,
     client::ServerCertVerified,
 };
+use tokio::{io::{ split, ReadHalf, WriteHalf}};
+use tun::{platform::Device as Tun};
+use tokio_rustls::client::TlsStream;
+
+#[derive(Debug)]
+pub struct PppSessionInfo {
+    pub ip: [u8; 4],
+    pub dns1: Option<[u8; 4]>,
+    pub dns2: Option<[u8; 4]>,
+}
 
 #[derive(Debug)]
 enum PppState {
@@ -29,7 +44,6 @@ enum PppState {
     SendIpcpAck,
     Done,
     WaitIpcpResponse,
-    SendIpcpCustomRequest,
     WaitIpcpNakWithOffer,
     WaitIpcpFinalAck,
     Error(String),
@@ -221,19 +235,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            PppState::SendIpcpCustomRequest => {
-                let ppp = ppp.unwrap();
-                println!("📤 Шлём свой IPCP Configure-Request (0.0.0.0 + DNS)");            
-                let req = build_ipcp_request_any_ip(ppp.id);
-                stream.write_all(&req).await?;
-                state = PppState::WaitIpcpResponse;
-            }
-
             PppState::WaitIpcpFinalAck => {
                 let ppp = ppp.unwrap();
             
                 if ppp.protocol == 0x8021 && ppp.code == 0x02 {
-                    println!("🎉 IPCP Configure-Ack, IP согласован!");
+                    println!(
+                        "🎉 IPCP Configure-Ack получен (ID = {}), IP согласован!",
+                        ppp.id
+                    );
+            
+                    // Парсим все опции
+                    let opts = extract_all_ipcp_options(&ppp.payload);
+                    let ip = opts.get(&0x03).copied().unwrap_or([0, 0, 0, 0]);
+                    let dns1 = opts.get(&0x81).copied();
+                    let dns2 = opts.get(&0x83).copied();
+            
+                    println!(
+                        "📦 Назначенный IP: {}.{}.{}.{}",
+                        ip[0], ip[1], ip[2], ip[3]
+                    );
+            
+                    if let Some(dns1) = dns1 {
+                        println!(
+                            "📦 Primary DNS: {}.{}.{}.{}",
+                            dns1[0], dns1[1], dns1[2], dns1[3]
+                        );
+                    }
+                    if let Some(dns2) = dns2 {
+                        println!(
+                            "📦 Secondary DNS: {}.{}.{}.{}",
+                            dns2[0], dns2[1], dns2[2], dns2[3]
+                        );
+                    }
+            
+                    let session_info = PppSessionInfo { ip, dns1, dns2 };
+            
+                    println!("✅ Сессия установлена: {session_info:#?}");
                     state = PppState::Done;
                 } else {
                     state = PppState::Error("❌ Ожидался IPCP Ack".into());
@@ -251,11 +288,119 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        println!("____________");
+        println!("____________________________");
     }
 
 
+    //todo: dhcp integration
 
+    setup_and_start_tunnel(stream).await?;
+
+    println!("🟢 TUN активен, туннелирование запущено. Ждём трафик...");
+
+    tokio::signal::ctrl_c().await.expect("Failed to listen for ctrl-c");
+    
+    Ok(())
+}
+
+/// Финальный шаг после PPP FSM: создаём TUN и запускаем туннелирование
+pub async fn setup_and_start_tunnel(stream: TlsStream<TcpStream>) -> std::io::Result<()> {
+    // ✅ Создаём TUN интерфейс
+    let mut config = Configuration::default();
+    config.address((192, 168, 30, 11)) // ← подставь реальный, если получен из IPCP
+          .netmask((255, 255, 255, 0))
+          .up();
+
+    let dev = create(&config).map_err(|e| {
+        std::io::Error::new(std::io::ErrorKind::Other, format!("tun create failed: {e}"))
+    })?;
+
+    // ✅ Оборачиваем в Arc<Mutex<>>
+    let dev =  Arc::new(Mutex::new(dev));
+
+    // ✅ Разделяем SSTP поток
+    let (reader, writer) = split(stream);
+
+    // ✅ Запускаем туннелирование
+    start_tun_forwarding(dev, reader, writer).await
+}
+
+/// Стартует IP-туннель: обменивается трафиком между SSTP и TUN
+pub async fn start_tun_forwarding(
+    dev: Arc<Mutex<Device>>,
+    mut reader: ReadHalf<TlsStream<TcpStream>>,
+    mut writer: WriteHalf<TlsStream<TcpStream>>,
+) -> std::io::Result<()> {
+    println!("🟢 TUN активен. Запускаем туннелирование...");
+
+    //📤 uplink: TUN → SSTP
+    {
+        let dev = dev.clone();
+        tokio::spawn(async move {
+            loop {
+                let buf = match tokio::task::spawn_blocking({
+                    let dev = dev.clone();
+                    move || {
+                        let mut buf = [0u8; 1600];
+                        let n = {
+                            let mut locked = dev.lock().unwrap();
+                            locked.read(&mut buf)
+                        }?;
+                        Ok::<_, std::io::Error>(buf[..n].to_vec())
+                    }
+                }).await {
+                    Ok(Ok(data)) => data, // ✅ теперь buf будет Vec<u8>
+                    Ok(Err(e)) => {
+                        eprintln!("❌ Ошибка чтения из TUN: {e}");
+                        continue; // 🔁 не break, чтобы buf не стал `()`
+                    }
+                    Err(e) => {
+                        eprintln!("❌ spawn_blocking panic: {e}");
+                        continue;
+                    }
+                };
+
+                let packet = wrap_ip_in_ppp_sstp(&buf);
+                if let Err(e) = writer.write_all(&packet).await {
+                    eprintln!("❌ Ошибка записи в SSTP: {e}");
+                    break;
+                }
+            }
+        });
+    }
+
+    // 📥 downlink: SSTP → TUN
+    {
+        let dev = dev.clone();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 1600];
+            loop {
+                let n = match reader.read(&mut buf).await {
+                    Ok(0) => {
+                        eprintln!("🔌 SSTP соединение закрыто");
+                        break;
+                    }
+                    Ok(n) => n,
+                    Err(e) => {
+                        eprintln!("❌ Ошибка чтения из SSTP: {e}");
+                        break;
+                    }
+                };
+
+                if let Some(ip_data) = parse_ppp_ip_packet(&buf[..n]) {
+                    let ip_data = ip_data.to_vec(); // выделяем для send в blocking
+                    let dev = dev.clone();
+
+                    tokio::task::spawn_blocking(move || {
+                        let mut dev = dev.lock().unwrap();
+                        dev.write_all(&ip_data)
+                    })
+                    .await
+                    .ok(); // можно логировать ошибку при необходимости
+                }
+            }
+        });
+    }
 
     Ok(())
 }

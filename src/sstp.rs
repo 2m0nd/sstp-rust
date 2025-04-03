@@ -592,3 +592,34 @@ pub fn extract_all_ipcp_options(payload: &[u8]) -> HashMap<u8, [u8; 4]> {
 
     options
 }
+
+pub fn wrap_ip_in_ppp_sstp(ip_data: &[u8]) -> Vec<u8> {
+    let mut ppp = vec![
+        0xFF, 0x03, // Address + Control
+        0x00, 0x21, // Protocol = IP
+    ];
+    ppp.extend_from_slice(ip_data);
+
+    let total_len = (ppp.len() + 4) as u16;
+    let mut sstp = vec![
+        0x10, 0x00, // SSTP v1, C = 0 (Data)
+        (total_len >> 8) as u8,
+        (total_len & 0xFF) as u8,
+    ];
+    sstp.extend_from_slice(&ppp);
+    sstp
+}
+
+pub fn parse_ppp_ip_packet(buf: &[u8]) -> Option<&[u8]> {
+    if buf.len() < 8 {
+        return None;
+    }
+
+    if buf[4] == 0xFF && buf[5] == 0x03 &&
+       buf[6] == 0x00 && buf[7] == 0x21 {
+        // Это PPP + IP
+        Some(&buf[8..])
+    } else {
+        None
+    }
+}
