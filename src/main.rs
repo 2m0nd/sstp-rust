@@ -2,6 +2,8 @@ mod sstp;
 mod parser;
 mod ssl_verifiers;
 use sstp::{
+    build_pap_authenticate_request,
+    wrap_ppp_pap_packet,
     wrap_lcp_packet,
     build_lcp_configure_ack,
     build_sstp_packet_from_ppp,
@@ -92,22 +94,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     stream.write_all(&lcp_request).await?;
     println!("📨 Отправлен LCP Configure-Request ({} байт): {:02X?}", lcp_request.len(), &lcp_request);
 
-    let mut counter = 0;
-    //читаем ответы на подключение по ppp
-    loop {
-        counter += 1;
-        println!("📡 Ждём пакеты от сервера...");
-        let n = stream.read(&mut buf).await?;
-        println!("[{}] 📥 Получено ({} байт): {:02X?}", counter, n, &buf[..n]);
+    println!("📡 Ждём пакеты от сервера...");
+    let n = stream.read(&mut buf).await?;
+    println!("📥 Получено ({} байт): {:02X?}", n, &buf[..n]);
 
-        if let Some(ppp) = parse_sstp_data_packet(&buf[..n]) {
-            if ppp.protocol == 0xC021 && ppp.code == 0x01 {
-                println!("🔧 Получен LCP Configure-Request от сервера (ID = {})", ppp.id);
-                let ack_packet = build_sstp_packet_from_ppp(0x02, &ppp); // Configure-Ack
-                stream.write_all(&ack_packet).await?;
-                let ack_len = ack_packet.len();
-                println!("✅ Отправлен Configure-Ack на LCP ({} байт): {:02X?}", 
-                        ack_len, &ack_packet[..ack_len]);
+    if let Some(ppp) = parse_sstp_data_packet(&buf[..n]) {
+        if ppp.protocol == 0xC021 && ppp.code == 0x01 {
+            println!("🔧 Получен LCP Configure-Request от сервера (ID = {})", ppp.id);
+            let ack_packet = build_sstp_packet_from_ppp(0x02, &ppp); // Configure-Ack
+            stream.write_all(&ack_packet).await?;
+            let ack_len = ack_packet.len();
+            println!("✅ Отправлен Configure-Ack на LCP ({} байт): {:02X?}", 
+                    ack_len, &ack_packet[..ack_len]);
+
+            //сразу стартуем авторизацию
+            let auth_pack = wrap_ppp_pap_packet(1, "AHC\\test_user_client", "EXAPLME_PWD");
+            let auth_pack_len = auth_pack.len();
+            stream.write_all(&auth_pack).await?;
+            println!("✅ auth pack ({} байт): {:02X?}", 
+                    auth_pack_len, &auth_pack[..auth_pack_len]);
+
+            
+            println!("📡 Ждём пакеты от сервера...");
+            let n = stream.read(&mut buf).await?;
+            println!("📥 Получено ({} байт): {:02X?}", n, &buf[..n]);
+            if let Some(ppp) = parse_sstp_data_packet(&buf[..n]) {
+
             }
         }
     }

@@ -402,3 +402,74 @@ pub fn build_sstp_packet_from_ppp(code: u8, ppp: &PppParsedFrame) -> Vec<u8> {
 
     sstp_packet
 }
+
+pub fn build_pap_authenticate_request(id: u8, username: &str, password: &str) -> Vec<u8> {
+    let user_bytes = username.as_bytes();
+    let pass_bytes = password.as_bytes();
+
+    let total_len = 4 + 1 + user_bytes.len() + 1 + pass_bytes.len();
+
+    let mut buf = Vec::with_capacity(total_len);
+
+    // PAP Header
+    buf.push(0x01); // Code: Authenticate-Request
+    buf.push(id);   // Identifier
+    buf.extend_from_slice(&(total_len as u16).to_be_bytes()); // Length
+
+    // Payload
+    buf.push(user_bytes.len() as u8);
+    buf.extend_from_slice(user_bytes);
+
+    buf.push(pass_bytes.len() as u8);
+    buf.extend_from_slice(pass_bytes);
+
+    buf
+}
+
+pub fn wrap_ppp_pap_packet(id: u8, username: &str, password: &str) -> Vec<u8> {
+    let pap_payload = build_pap_authenticate_request(id, username, password);
+
+    let mut ppp = Vec::new();
+    ppp.extend_from_slice(&[0xFF, 0x03]);           // PPP Header
+    ppp.extend_from_slice(&[0xC0, 0x23]);           // Protocol: PAP (0xC023)
+    ppp.extend_from_slice(&pap_payload);
+
+    let total_len = (ppp.len() + 4) as u16;
+
+    let mut sstp = Vec::new();
+    sstp.push(0x10); // SSTP Version
+    sstp.push(0x00); // Data Packet
+    sstp.extend_from_slice(&total_len.to_be_bytes());
+    sstp.extend_from_slice(&ppp);
+
+    sstp
+}
+
+/// Строит SSTP Data пакет с PPP IPCP Configure-Request (IP Address = 0.0.0.0)
+pub fn build_ipcp_configure_request_packet(id: u8) -> Vec<u8> {
+    let mut ppp = Vec::new();
+
+    // === PPP Header ===
+    ppp.extend_from_slice(&[0xFF, 0x03]);       // Address + Control
+    ppp.extend_from_slice(&[0x80, 0x21]);       // Protocol = IPCP (0x8021)
+
+    // === IPCP Configure-Request ===
+    let payload = [
+        0x01,                   // Code = Configure-Request
+        id,                    // Identifier
+        0x00, 0x0A,             // Length = 10 bytes
+        0x03, 0x06,             // Option: IP Address (type=3, len=6)
+        0x00, 0x00, 0x00, 0x00  // IP Address = 0.0.0.0 (мы просим у сервера)
+    ];
+    ppp.extend_from_slice(&payload);
+
+    // === SSTP Header ===
+    let total_len = (ppp.len() + 4) as u16;
+    let mut sstp = Vec::new();
+    sstp.push(0x10); // Version 1.0
+    sstp.push(0x00); // C = 0 (Data)
+    sstp.extend_from_slice(&total_len.to_be_bytes());
+    sstp.extend_from_slice(&ppp);
+
+    sstp
+}
