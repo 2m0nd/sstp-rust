@@ -9,6 +9,9 @@ use sstp::{
     parse_sstp_data_packet,
     build_lcp_configure_request,
     build_configure_ack_from_request,
+    build_configure_nak_from_request,
+    build_lcp_configure_request_fallback,
+    build_lcp_configure_request_chap_simple,
     build_configure_ack
 };
 use ssl_verifiers::DisabledVerifier;
@@ -80,31 +83,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("📥 Ответ на Hello ({} байт): {:02X?}", n, &buf[..n]);
     parse_sstp_control_packet(&buf[..n]);
 
-    sleep(Duration::from_millis(500)).await;
-
+    
     let lcp_packet = build_lcp_configure_request();
     stream.write_all(&lcp_packet).await?;
     println!("📨 Отправлен LCP Configure-Request, ({} байт): {:02X?}", lcp_packet.len(), &lcp_packet);
 
-    let n = stream.read(&mut buf).await?;
-    parse_sstp_data_packet(&buf[..n]);
-
-    if is_lcp_configure_request(&buf[..n]) {
-        println!("🔁 Получен Configure-Request от сервера");
-        if let Some(ack) = build_configure_ack_from_request(&buf[..n]) {
-            stream.write_all(&ack).await?;
-            println!("✅ Отправлен Configure-Ack");
-        }
-    }
+    let mut reconfigured = false;
 
     loop {
+        println!("Reading...");
         let n = stream.read(&mut buf).await?;
         println!("📥 Получено ({} байт): {:02X?}", n, &buf[..n]);
-        parse_sstp_data_packet(&buf[..n]);
 
-        if is_chap_challenge(&buf[..n]) {
-            println!("🛂 Получен CHAP Challenge! 💥");
-            break;
+        match buf.get(8) {
+            Some(0x01) if is_lcp_configure_request(&buf[..n]) => {
+                let id = buf[9];
+                println!("🔁 Получен Configure-Request ID = {}", id);
+
+                if let Some(ack) = build_configure_ack_from_request(&buf[..n]) {
+                    stream.write_all(&ack).await?;
+                    println!("📤 Отправлен Configure-Ack");
+                }
+            }
+
+            Some(0x02) => {
+                println!("✅ Получен Configure-Ack от сервера — ждём CHAP");
+            }
+
+            Some(0x04) => {
+                println!("⛔ Получен Configure-Reject от сервера");
+
+                if !reconfigured {
+                    let fallback = sstp::build_lcp_configure_request_fallback();
+                    stream.write_all(&fallback).await?;
+                    println!("📤 Повторно отправлен упрощённый Configure-Request");
+                    reconfigured = true;
+                }
+            }
+
+            Some(0x01) if is_chap_challenge(&buf[..n]) => {
+                println!("🛂 Получен CHAP Challenge! 💥");
+                break;
+            }
+
+            Some(0x05) => {
+                println!("❌ Получен Terminate-Request от сервера — соединение сброшено");
+                break;
+            }
+
+            _ => {
+                println!("🕵️ Неизвестный пакет, продолжаем слушать...");
+            }
         }
     }
 
