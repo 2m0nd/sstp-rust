@@ -37,3 +37,14 @@ pub fn parse_ppp_frame(buf: &[u8]) -> Option<PppParsedFrame> {
         payload,
     })
 }
+
+pub fn extract_option_value(payload: &[u8], option_type: u8) -> Option<[u8; 4]> {
+    let mut i = 0;
+    while i + 6 <= payload.len() {
+        if payload[i] == option_type && payload[i + 1] == 6 {
+            return Some([payload[i + 2], payload[i + 3], payload[i + 4], payload[i + 5]]);
+        }
+        i += payload[i + 1] as usize; // длина текущей опции
+    }
+    None
+}

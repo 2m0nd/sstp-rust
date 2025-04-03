@@ -1,6 +1,8 @@
+use tokio::io::AsyncReadExt;
 use uuid::Uuid;
 use crate::parser::parse_ppp_frame;
 use crate::parser::PppParsedFrame;
+use std::collections::HashMap;
 
 pub fn build_sstp_hello(correlation_id: Uuid) -> Vec<u8> {
     let mut hello = vec![
@@ -459,7 +461,7 @@ pub fn build_ipcp_configure_request_packet(id: u8) -> Vec<u8> {
         id,                    // Identifier
         0x00, 0x0A,             // Length = 10 bytes
         0x03, 0x06,             // Option: IP Address (type=3, len=6)
-        0x00, 0x00, 0x00, 0x00  // IP Address = 0.0.0.0 (мы просим у сервера)
+        0x00, 0x00, 0x00, 0x00,  // IP Address = 0.0.0.0 (мы просим у сервера)
     ];
     ppp.extend_from_slice(&payload);
 
@@ -472,4 +474,121 @@ pub fn build_ipcp_configure_request_packet(id: u8) -> Vec<u8> {
     sstp.extend_from_slice(&ppp);
 
     sstp
+}
+
+pub fn wrap_ipcp_packet(code: u8, id: u8, options: &[u8]) -> Vec<u8> {
+    let mut ppp = Vec::new();
+
+    // PPP Header
+    ppp.extend_from_slice(&[0xFF, 0x03, 0x80, 0x21]); // Address + Control + Protocol
+
+    // IPCP Header
+    let length = (4 + options.len()) as u16;
+    ppp.push(code);
+    ppp.push(id);
+    ppp.extend_from_slice(&length.to_be_bytes());
+    ppp.extend_from_slice(options);
+
+    // SSTP Header
+    let total_len = (ppp.len() + 4) as u16;
+    let mut sstp = vec![0x10, 0x00];
+    sstp.extend_from_slice(&total_len.to_be_bytes());
+    sstp.extend_from_slice(&ppp);
+
+    sstp
+}
+
+pub fn build_ipcp_configure_ack(id: u8, ip: [u8; 4]) -> Vec<u8> {
+    let option = [0x03, 0x06, ip[0], ip[1], ip[2], ip[3]];
+    wrap_ipcp_packet(0x02, id, &option)
+}
+
+pub fn build_ipcp_configure_reject(id: u8, option: &[u8]) -> Vec<u8> {
+    wrap_ipcp_packet(0x04, id, option)
+}
+
+pub fn build_ipcp_request_any_ip(id: u8) -> Vec<u8> {
+    let options = [
+        0x03, 0x06, 0x00, 0x00, 0x00, 0x00, // IP = 0.0.0.0
+        0x81, 0x06, 0x00, 0x00, 0x00, 0x00, // DNS = 0.0.0.0
+    ];
+    wrap_ipcp_packet(0x01, id, &options)
+}
+
+pub fn build_ipcp_request_with(ip: [u8; 4], dns: [u8; 4], id: u8) -> Vec<u8> {
+    let mut options = vec![
+        0x03, 0x06, ip[0], ip[1], ip[2], ip[3],
+        0x81, 0x06, dns[0], dns[1], dns[2], dns[3],
+    ];
+    wrap_ipcp_packet(0x01, id, &options)
+}
+
+pub fn build_ipcp_request_with_only_ip(ip: [u8; 4], id: u8) -> Vec<u8> {
+    let mut options = vec![
+        0x03, 0x06, ip[0], ip[1], ip[2], ip[3]
+    ];
+    wrap_ipcp_packet(0x01, id, &options)
+}
+
+pub async fn read_and_parse<R: AsyncReadExt + Unpin>(
+    stream: &mut R,
+    buf: &mut [u8],
+) -> Option<PppParsedFrame> {
+    match stream.read(buf).await {
+        Ok(n) if n > 0 => {
+            println!("📥 Получено ({} байт): {:02X?}", n, &buf[..n]);
+            parse_sstp_data_packet(&buf[..n])
+        }
+        Ok(_) => {
+            println!("⚠️ Сервер закрыл соединение");
+            None
+        }
+        Err(e) => {
+            eprintln!("❌ Ошибка чтения: {}", e);
+            None
+        }
+    }
+}
+
+pub fn build_sstp_call_connected_packet() -> Vec<u8> {
+    vec![
+        0x10, 0x02, 0x00, 0x10, // SSTP Header: Version 1.0, Control, Length=16
+        0x00, 0x02,             // Message Type: CALL_CONNECTED
+        0x00, 0x00,             // Attributes Count = 0
+        0x00, 0x00, 0x00, 0x00, // Reserved
+        0x00, 0x00, 0x00, 0x00, // Reserved
+    ]
+}
+
+pub fn extract_all_ipcp_options(payload: &[u8]) -> HashMap<u8, [u8; 4]> {
+    let mut options = HashMap::new();
+    let mut i = 0;
+
+    while i + 2 <= payload.len() {
+        let opt_type = payload[i];
+        let len = payload[i + 1] as usize;
+
+        if len < 2 || i + len > payload.len() {
+            println!("⚠️ IPCP option повреждена или выходит за границы: type={}, len={}", opt_type, len);
+            break;
+        }
+
+        if len == 6 {
+            options.insert(
+                opt_type,
+                [
+                    payload[i + 2],
+                    payload[i + 3],
+                    payload[i + 4],
+                    payload[i + 5],
+                ],
+            );
+        } else {
+            println!("ℹ️ Пропущена опция длиной {}, тип {}", len, opt_type);
+        }
+
+        i += len;
+    }
+
+    options
 }

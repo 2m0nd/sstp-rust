@@ -2,6 +2,7 @@ mod sstp;
 mod parser;
 mod ssl_verifiers;
 use crate::sstp::*;
+use crate::parser::*;
 use ssl_verifiers::DisabledVerifier;
 use uuid::Uuid;
 use tokio::time::{sleep, Duration};
@@ -16,8 +17,28 @@ use tokio_rustls::rustls::{
     client::ServerCertVerified,
 };
 
+#[derive(Debug)]
+enum PppState {
+    SendLcpRequest,
+    WaitLcpRequest,
+    SendLcpAck,
+    SendPapAuth,
+    WaitPapAck,
+    SendIpcpRequest,
+    WaitIpcpRequest,
+    SendIpcpAck,
+    Done,
+    WaitIpcpResponse,
+    SendIpcpCustomRequest,
+    WaitIpcpNakWithOffer,
+    WaitIpcpFinalAck,
+    Error(String),
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let user = "AHC\\test_user_client";
+    let pwd = "EXAPLME_PWD";
     let server_ip = "SSTP_SERVER_IP_ADDRESS";
     let addr = format!("{server_ip}:443");
     let server_domain_name = "DNS_NAME_SSTP_SERVER";
@@ -70,49 +91,169 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let n = stream.read(&mut buf).await?;
     println!("📥 Ответ на Hello ({} байт): {:02X?}", n, &buf[..n]);
 
+    let mut buf = [0u8; 1500];
+    let mut state = PppState::SendLcpRequest;
+    let mut id_counter: u8 = 1;
 
-    let lcp_request = build_sstp_ppp_lcp_request();
-
-    stream.write_all(&lcp_request).await?;
-    println!("📨 Отправлен LCP Configure-Request ({} байт): {:02X?}", lcp_request.len(), &lcp_request);
-
-    println!("📡 Ждём пакеты от сервера...");
-    let n = stream.read(&mut buf).await?;
-    println!("📥 Получено ({} байт): {:02X?}", n, &buf[..n]);
-
-    if let Some(ppp) = parse_sstp_data_packet(&buf[..n]) {
-        if ppp.protocol == 0xC021 && ppp.code == 0x01 {
-            println!("🔧 Получен LCP Configure-Request от сервера (ID = {})", ppp.id);
-            let ack_packet = build_sstp_packet_from_ppp(0x02, &ppp); // Configure-Ack
-            stream.write_all(&ack_packet).await?;
-            let ack_len = ack_packet.len();
-            println!("✅ Отправлен Configure-Ack на LCP ({} байт): {:02X?}", 
-                    ack_len, &ack_packet[..ack_len]);
-
-            //сразу стартуем авторизацию
-            let auth_pack = wrap_ppp_pap_packet(1, "AHC\\test_user_client", "EXAPLME_PWD");
-            let auth_pack_len = auth_pack.len();
-            stream.write_all(&auth_pack).await?;
-            println!("✅ auth pack ({} байт): {:02X?}", 
-                    auth_pack_len, &auth_pack[..auth_pack_len]);
-
-            
-            println!("📡 Ждём пакеты от сервера...");
-            let n = stream.read(&mut buf).await?;
-            println!("📥 Получено ({} байт): {:02X?}", n, &buf[..n]);
-            if let Some(ppp) = parse_sstp_data_packet(&buf[..n]) {
-
-                let ipcp_packet = build_ipcp_configure_request_packet(1);
-                println!("✅ ipcp req ({} байт): {:02X?}", 
-                    auth_pack_len, &auth_pack[..auth_pack_len]);
-                stream.write_all(&ipcp_packet).await?;
-                let n = stream.read(&mut buf).await?;
-                println!("📥 Получено ({} байт): {:02X?}", n, &buf[..n]);
-                if let Some(ppp) = parse_sstp_data_packet(&buf[..n]) {
+    loop {
+        let ppp = match state {
+            PppState::WaitIpcpNakWithOffer |
+            PppState::WaitLcpRequest |
+            PppState::WaitPapAck |
+            PppState::WaitIpcpFinalAck |
+            PppState::WaitIpcpRequest => {
+                println!("📡 Ожидание пакета...");
+                match read_and_parse(&mut stream, &mut buf).await {
+                    Some(ppp) => Some(ppp),
+                    None => {
+                        eprintln!("❌ Ошибка чтения/парсинга пакета");
+                        state = PppState::Error("Парсинг не удался".into());
+                        None
+                    }
                 }
             }
+            _ => None,
+        };
+
+        match state {
+            
+            PppState::SendLcpAck |
+            PppState::WaitIpcpResponse |
+             PppState::SendIpcpAck => {
+                eprintln!("⚠️ Не реализовано: {:?}", state);
+                state = PppState::Error("Не реализовано".into());
+            }
+            
+            PppState::SendLcpRequest => {
+                let packet = build_sstp_ppp_lcp_request();
+                stream.write_all(&packet).await?;
+                println!("📨 Отправлен LCP Configure-Request");
+                state = PppState::WaitLcpRequest;
+            }
+
+            PppState::WaitLcpRequest => {
+                let ppp = ppp.unwrap(); // безопасно, мы уже проверили выше
+                if ppp.protocol == 0xC021 && ppp.code == 0x01 {
+                    let ack = build_sstp_packet_from_ppp(0x02, &ppp);
+                    stream.write_all(&ack).await?;
+                    state = PppState::SendPapAuth;
+                } else {
+                    state = PppState::Error("Неожиданный LCP".into());
+                }
+            }
+
+            PppState::SendPapAuth => {
+                let auth = wrap_ppp_pap_packet(id_counter, user, pwd);
+                stream.write_all(&auth).await?;
+                id_counter += 1;
+                state = PppState::WaitPapAck;
+            }
+
+            PppState::WaitPapAck => {
+                let ppp = ppp.unwrap();
+                if ppp.protocol == 0xC023 && ppp.code == 0x02 {
+                    println!("✅ PAP Authenticate-Ack");
+                    
+                    // 💬 Вставляем CALL_CONNECTED
+                    let packet = build_sstp_call_connected_packet();
+                    stream.write_all(&packet).await?;
+                    println!("📡 Отправлен SSTP CALL_CONNECTED");
+                    
+                    state = PppState::SendIpcpRequest;
+                } else {
+                    state = PppState::Error("Ожидался PAP Ack".into());
+                }
+            }
+
+            PppState::SendIpcpRequest => {
+                let ipcp = build_ipcp_configure_request_packet(id_counter);
+                stream.write_all(&ipcp).await?;
+                id_counter += 1;
+                state = PppState::WaitIpcpRequest;
+            }
+
+            PppState::WaitIpcpRequest => {
+                let ppp = ppp.unwrap();
+                if ppp.protocol == 0x8021 && ppp.code == 0x01 {
+                    println!("📥 IPCP Configure-Request: ID={}, len={}", ppp.id, ppp.length);
+            
+                    // Пытаемся достать IP из Option 3
+                if let Some(ip) = extract_option_value(&ppp.payload, 0x03) {
+                    println!("📦 Сервер предлагает IP: {}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
+                    println!("✅ Принимаем IP, отправляем Configure-Ack");
+                    let ack = build_ipcp_configure_ack(ppp.id, ip);
+                    stream.write_all(&ack).await?;
+                    state = PppState::WaitIpcpNakWithOffer;
+                } else {
+                    println!("⚠️ Нет опции IP-адреса в Configure-Request — игнорируем");
+                    state = PppState::Error("IPCP Configure-Request без IP-опции".into());
+                }
+                    
+                } else {
+                    state = PppState::Error("❌ Неожиданный IPCP пакет".into());
+                }
+            }
+
+            PppState::WaitIpcpNakWithOffer => {
+                let ppp = ppp.unwrap();
+            
+                if ppp.protocol == 0x8021 && ppp.code == 0x03 {
+                    println!("📥 Получен IPCP Configure-Nak (ID = {})", ppp.id);
+            
+                    for (k, v) in extract_all_ipcp_options(&ppp.payload) {
+                        println!("🔧 option {} → {}.{}.{}.{}", k, v[0], v[1], v[2], v[3]);
+                    }
+
+                    let ip = extract_option_value(&ppp.payload, 0x03).unwrap_or([0, 0, 0, 0]);
+                    let dns = extract_option_value(&ppp.payload, 0x81).unwrap_or([0, 0, 0, 0]);
+            
+                    println!("📦 IP  = {}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
+                    println!("📦 DNS = {}.{}.{}.{}", dns[0], dns[1], dns[2], dns[3]);
+            
+                    // отправляем новый Configure-Request с этими параметрами
+                    let req = build_ipcp_request_with_only_ip(ip, id_counter);
+                    println!("id {} nak request only ip again ({} байт): {:02X?}", id_counter, req.len(), &req[..req.len()]);
+                    stream.write_all(&req).await?;
+                    id_counter += 1;                
+                    state = PppState::WaitIpcpFinalAck;
+                } else {
+                    state = PppState::Error("❌ Ожидался IPCP Nak с предложением IP".into());
+                }
+            }
+
+            PppState::SendIpcpCustomRequest => {
+                let ppp = ppp.unwrap();
+                println!("📤 Шлём свой IPCP Configure-Request (0.0.0.0 + DNS)");            
+                let req = build_ipcp_request_any_ip(ppp.id);
+                stream.write_all(&req).await?;
+                state = PppState::WaitIpcpResponse;
+            }
+
+            PppState::WaitIpcpFinalAck => {
+                let ppp = ppp.unwrap();
+            
+                if ppp.protocol == 0x8021 && ppp.code == 0x02 {
+                    println!("🎉 IPCP Configure-Ack, IP согласован!");
+                    state = PppState::Done;
+                } else {
+                    state = PppState::Error("❌ Ожидался IPCP Ack".into());
+                }
+            }
+
+            PppState::Done => {
+                println!("🎉 Соединение установлено!");
+                break;
+            }
+
+            PppState::Error(e) => {
+                eprintln!("❌ Ошибка: {}", e);
+                break;
+            }
         }
+
+        println!("____________");
     }
+
 
 
 
