@@ -1,6 +1,8 @@
 mod sstp;
 mod ssl_verifiers;
 use sstp::{
+    is_chap_challenge,
+    is_lcp_configure_request,
     build_sstp_hello, 
     parse_sstp_control_packet, 
     parse_sstp_data_packet,
@@ -9,8 +11,8 @@ use sstp::{
     build_configure_ack};
 use ssl_verifiers::DisabledVerifier;
 use uuid::Uuid;
+use tokio::time::{sleep, Duration};
 
-use std::time::Duration;
 use std::net::IpAddr;
 use std::sync::Arc;
 use tokio::{net::TcpStream, io::{AsyncReadExt, AsyncWriteExt}};
@@ -88,18 +90,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("📥 Ответ на Hello ({} байт): {:02X?}", n, &buf[..n]);
     parse_sstp_control_packet(&buf[..n]);
 
+    sleep(Duration::from_millis(5000)).await;
     let lcp_packet = build_lcp_configure_request();
     stream.write_all(&lcp_packet).await?;
-    println!("📨 Отправлен LCP Configure-Request");
+    println!("📨 Отправлен LCP Configure-Request, ({} байт): {:02X?}", lcp_packet.len(), &lcp_packet);
 
     let n = stream.read(&mut buf).await?;
-    println!("📥 Получено ({} байт): {:02X?}", n, &buf[..n]);
-    parse_sstp_data_packet(&buf[..n]);
+    parse_sstp_control_packet(&buf[..n]);
+    
+    // //set config
+    // loop {
+    //     let n = stream.read(&mut buf).await?;
+    //     println!("📥 Получено ({} байт)", n);
 
-    if let Some(ack) = build_configure_ack_from_request(&buf[..n]) {
-        stream.write_all(&ack).await?;
-        println!("✅ Отправлен Configure-Ack в ответ на сервер");
-    }
+    //     if n >= 6 && buf[0] == 0x10 && buf[1] == 0x01 {
+    //         // SSTP Control Packet
+    //         let msg_type = u16::from_be_bytes([buf[4], buf[5]]);
+    //         match msg_type {
+    //             0x0003 => println!("🎉 Повторно получен Call Connected — всё ещё в PPP режиме"),
+    //             0x0005 => {
+    //                 println!("⛔ Получен Call Disconnect — сервер завершил соединение");
+    //                 break;
+    //             }
+    //             _ => println!("📡 Получен другой SSTP Control: 0x{:04X}", msg_type),
+    //         }
+    //     }
+
+    //     // Определим, что это
+    //     if is_lcp_configure_request(&buf[..n]) {
+    //         println!("🔁 Получен Configure-Request от сервера");
+    //         if let Some(ack) = build_configure_ack_from_request(&buf[..n]) {
+    //             stream.write_all(&ack).await?;
+    //             println!("✅ Отправлен Configure-Ack");
+    //         }
+    //     } else if is_chap_challenge(&buf[..n]) {
+    //         println!("🛂 Получен CHAP Challenge!");
+    //         // тут break и переход к обработке CHAP
+    //         break;
+    //     } else {
+    //         println!("❓ Неизвестный или неожиданный пакет, продолжаем слушать");
+    //     }
+    // }
 
     Ok(())
 }

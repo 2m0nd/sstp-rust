@@ -93,65 +93,57 @@ pub fn parse_sstp_data_packet(buf: &[u8]) {
 }
 
 pub fn build_configure_ack_from_request(sstp_payload: &[u8]) -> Option<Vec<u8>> {
-    // Проверка минимальной длины: 4 байта SSTP + 6 PPP (без опций)
-    if sstp_payload.len() < 12 {
+    const SSTP_HEADER_LEN: usize = 4;
+    const PPP_HEADER_LEN: usize = 2 + 2; // Addr/Control + Protocol
+    const PPP_LCP_HEADER_LEN: usize = 4; // Code, ID, Length
+
+    if sstp_payload.len() < SSTP_HEADER_LEN + PPP_HEADER_LEN + PPP_LCP_HEADER_LEN {
         println!("❌ Слишком короткий SSTP пакет для LCP.");
         return None;
     }
 
-    // Пропускаем 4 байта SSTP + 2 (Addr/Control) + 2 (Protocol)
-    let code = sstp_payload[8];
-    let id = sstp_payload[9];
-    let length = u16::from_be_bytes([sstp_payload[10], sstp_payload[11]]) as usize;
+    let ppp_start = SSTP_HEADER_LEN + PPP_HEADER_LEN;
+
+    let code = sstp_payload[ppp_start];
+    let id = sstp_payload[ppp_start + 1];
+    let length = u16::from_be_bytes([
+        sstp_payload[ppp_start + 2],
+        sstp_payload[ppp_start + 3],
+    ]) as usize;
 
     if code != 0x01 {
         println!("⚠️ Это не Configure-Request (code = 0x{:02X})", code);
         return None;
     }
 
-    if sstp_payload.len() < 12 + (length - 6) {
+    let expected_total_len = ppp_start + length;
+    if sstp_payload.len() < expected_total_len {
         println!("❌ Пакет не содержит все опции, указанные в Length.");
         return None;
     }
 
-    let options = &sstp_payload[12..12 + (length - 6)];
+    let options = &sstp_payload[ppp_start + 4..expected_total_len];
 
-    println!("🧩 Отвечаем Configure-Ack с ID = {}, опций = {} байт", id, options.len());
-
-    Some(build_configure_ack(id, options))
-}
-
-pub fn build_lcp_configure_request() -> Vec<u8> {
-    let ppp_lcp = vec![
-        0xC0, 0x21, // PPP Protocol = LCP (0xC021)
-        0x01,       // Code = Configure-Request
-        0x01,       // Identifier
-        0x00, 0x04  // Length = 4 (заголовок без опций)
-    ];
-
-    let length = ppp_lcp.len() + 4;
-    let mut sstp_data = vec![
-        0x10, 0x00,                     // Version 1.0, Data Packet (Control bit = 0)
-        (length >> 8) as u8, (length & 0xFF) as u8, // Length
-    ];
-    sstp_data.extend_from_slice(&ppp_lcp);
-    sstp_data
+    println!("📥 Оригинальный Configure-Request ({} байт): {:02X?}", length, &sstp_payload[ppp_start..ppp_start + length]);
+    let ack = build_configure_ack(id, options);
+    println!("📤 Сформированный Configure-Ack ({} байт): {:02X?}", ack.len(), &ack);
+    Some(ack)
 }
 
 pub fn build_configure_ack(reply_id: u8, options: &[u8]) -> Vec<u8> {
     let mut ppp = vec![
-        0xFF, 0x03,       // PPP Address + Control
-        0xC0, 0x21,       // Protocol = LCP
+        0xFF, 0x03,       // Address + Control
+        0xC0, 0x21,       // LCP Protocol
         0x02,             // Code = Configure-Ack
-        reply_id,         // ID = такой же, как в запросе
+        reply_id,
     ];
 
-    let length = (options.len() + 4) as u16;
+    let length = (options.len() + 4) as u16; // Code + ID + Length (4)
     ppp.push((length >> 8) as u8);
     ppp.push((length & 0xFF) as u8);
     ppp.extend_from_slice(options);
 
-    // SSTP Data Packet обёртка
+    // SSTP заголовок
     let total_len = ppp.len() + 4;
     let mut sstp = vec![
         0x10, 0x00,
@@ -160,4 +152,52 @@ pub fn build_configure_ack(reply_id: u8, options: &[u8]) -> Vec<u8> {
     ];
     sstp.extend_from_slice(&ppp);
     sstp
+}
+
+
+pub fn build_lcp_configure_request() -> Vec<u8> {
+    let options = vec![
+        0x03, 0x04, 0xC0, 0x23,             // Magic Number
+        0x05, 0x06, 0xC2, 0x23              // Auth Protocol: CHAP (0xC223)
+    ];
+
+    let mut ppp = vec![
+        0xFF, 0x03,
+        0xC0, 0x21,
+        0x01,  // Code = Configure-Request
+        0x01,  // ID
+    ];
+
+    let length = (options.len() + 4) as u16;
+    ppp.push((length >> 8) as u8);
+    ppp.push((length & 0xFF) as u8);
+    ppp.extend_from_slice(&options);
+
+    let total_len = ppp.len() + 4;
+    let mut sstp = vec![
+        0x10, 0x00,
+        (total_len >> 8) as u8,
+        (total_len & 0xFF) as u8,
+    ];
+    sstp.extend_from_slice(&ppp);
+    sstp
+}
+
+
+pub fn is_lcp_configure_request(buf: &[u8]) -> bool {
+    buf.len() >= 12 &&
+    buf[4] == 0xFF &&
+    buf[5] == 0x03 &&
+    buf[6] == 0xC0 &&
+    buf[7] == 0x21 &&
+    buf[8] == 0x01 // Code = Configure-Request
+}
+
+pub fn is_chap_challenge(buf: &[u8]) -> bool {
+    buf.len() >= 12 &&
+    buf[4] == 0xFF &&
+    buf[5] == 0x03 &&
+    buf[6] == 0xC2 &&
+    buf[7] == 0x23 &&
+    buf[8] == 0x01 // Code = Challenge
 }
