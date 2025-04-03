@@ -395,7 +395,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "sstp-rust"
+name = "sstp_rust"
 version = "0.1.0"
 dependencies = [
  "pnet_packet",

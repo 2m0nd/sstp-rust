@@ -42,9 +42,9 @@ pub fn parse_sstp_control_packet(buf: &[u8]) {
 
 pub fn parse_sstp_data_packet(buf: &[u8]) -> Option<PppParsedFrame> {
     if let Some(ppp) = parse_ppp_frame(buf) {
-        println!("📦 SSTP Data Packet: длина = {}", buf.len());
-        println!("🔗 PPP Protocol: 0x{:04X}", ppp.protocol);
-        println!("🔗 PPP Code: 0x{:04X}", ppp.code);
+        // println!("📦 SSTP Data Packet: длина = {}", buf.len());
+        // println!("🔗 PPP Protocol: 0x{:04X}", ppp.protocol);
+        // println!("🔗 PPP Code: 0x{:04X}", ppp.code);
 
         let code_str = match ppp.code {
             1 => "Configure-Request",
@@ -340,4 +340,41 @@ pub fn build_sstp_ppp_lcp_request() -> Vec<u8> {
     buf[3] = (len_field & 0xFF) as u8;
 
     buf
+}
+
+pub fn build_lcp_configure_ack(id: u8, payload: &[u8]) -> Vec<u8> {
+    let length = (4 + payload.len()) as u16;
+    let mut buf = Vec::new();
+    buf.push(0x02); // Code: Configure-Ack
+    buf.push(id);   // Identifier
+    buf.extend_from_slice(&length.to_be_bytes()); // Length
+    buf.extend_from_slice(payload); // Echo back the options exactly
+    buf
+}
+
+pub fn wrap_lcp_packet(code: u8, id: u8, data: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::new();
+
+    // PPP Header
+    payload.push(0xFF); // Address
+    payload.push(0x03); // Control
+    payload.push(0xC0); // Protocol (LCP)
+    payload.push(0x21);
+
+    // LCP Frame
+    payload.push(code);      // Code (e.g. Configure-Ack)
+    payload.push(id);        // Identifier
+    let total_len = (4 + data.len()) as u16;
+    payload.extend_from_slice(&total_len.to_be_bytes());
+    payload.extend_from_slice(data);
+
+    // SSTP Header
+    let mut sstp = Vec::new();
+    sstp.push(0x10); // Version 1.0
+    sstp.push(0x00); // C = 0 (Data)
+    let sstp_len = (payload.len() + 4) as u16;
+    sstp.extend_from_slice(&sstp_len.to_be_bytes());
+
+    sstp.extend_from_slice(&payload);
+    sstp
 }
