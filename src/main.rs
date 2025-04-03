@@ -1,4 +1,5 @@
 mod sstp;
+mod parser;
 mod ssl_verifiers;
 use sstp::{
     is_chap_challenge,
@@ -98,39 +99,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let n = stream.read(&mut buf).await?;
     parse_sstp_control_packet(&buf[..n]);
     
-    // //set config
-    // loop {
-    //     let n = stream.read(&mut buf).await?;
-    //     println!("📥 Получено ({} байт)", n);
-
-    //     if n >= 6 && buf[0] == 0x10 && buf[1] == 0x01 {
-    //         // SSTP Control Packet
-    //         let msg_type = u16::from_be_bytes([buf[4], buf[5]]);
-    //         match msg_type {
-    //             0x0003 => println!("🎉 Повторно получен Call Connected — всё ещё в PPP режиме"),
-    //             0x0005 => {
-    //                 println!("⛔ Получен Call Disconnect — сервер завершил соединение");
-    //                 break;
-    //             }
-    //             _ => println!("📡 Получен другой SSTP Control: 0x{:04X}", msg_type),
-    //         }
-    //     }
-
-    //     // Определим, что это
-    //     if is_lcp_configure_request(&buf[..n]) {
-    //         println!("🔁 Получен Configure-Request от сервера");
-    //         if let Some(ack) = build_configure_ack_from_request(&buf[..n]) {
-    //             stream.write_all(&ack).await?;
-    //             println!("✅ Отправлен Configure-Ack");
-    //         }
-    //     } else if is_chap_challenge(&buf[..n]) {
-    //         println!("🛂 Получен CHAP Challenge!");
-    //         // тут break и переход к обработке CHAP
-    //         break;
-    //     } else {
-    //         println!("❓ Неизвестный или неожиданный пакет, продолжаем слушать");
-    //     }
-    // }
 
     Ok(())
 }
