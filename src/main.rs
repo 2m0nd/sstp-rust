@@ -1,25 +1,7 @@
 mod sstp;
 mod parser;
 mod ssl_verifiers;
-use sstp::{
-    build_pap_authenticate_request,
-    wrap_ppp_pap_packet,
-    wrap_lcp_packet,
-    build_lcp_configure_ack,
-    build_sstp_packet_from_ppp,
-    is_chap_challenge,
-    is_lcp_configure_request,
-    build_sstp_hello,
-    parse_sstp_control_packet,
-    parse_sstp_data_packet,
-    build_lcp_configure_request,
-    build_sstp_ppp_lcp_request,
-    build_configure_ack_from_request,
-    build_configure_nak_from_request,
-    build_lcp_configure_request_fallback,
-    build_lcp_configure_request_chap_simple,
-    build_configure_ack
-};
+use crate::sstp::*;
 use ssl_verifiers::DisabledVerifier;
 use uuid::Uuid;
 use tokio::time::{sleep, Duration};
@@ -120,6 +102,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("📥 Получено ({} байт): {:02X?}", n, &buf[..n]);
             if let Some(ppp) = parse_sstp_data_packet(&buf[..n]) {
 
+                let ipcp_packet = build_ipcp_configure_request_packet(1);
+                println!("✅ ipcp req ({} байт): {:02X?}", 
+                    auth_pack_len, &auth_pack[..auth_pack_len]);
+                stream.write_all(&ipcp_packet).await?;
+                let n = stream.read(&mut buf).await?;
+                println!("📥 Получено ({} байт): {:02X?}", n, &buf[..n]);
+                if let Some(ppp) = parse_sstp_data_packet(&buf[..n]) {
+                }
             }
         }
     }
