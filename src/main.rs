@@ -494,6 +494,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     stream.write_all(&dhcp_packet).await?;
                     log_send("DHCP Inform", &dhcp_packet, &state);
             
+
                     // Переход в следующее состояние
                     state = PppState::WaitEchoRequest;
                 } else {
@@ -575,7 +576,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //смотрим че дальше летает с этого момента
     DEBUG_PARSE.store(true, Ordering::Relaxed);
 
-
     if let Some(info) = &session_info {
         println!("🌐 IP = {:?}, DNS = {:?}", info.ip, info.dns1);
         
@@ -651,13 +651,12 @@ pub async fn start_tun_forwarding(
                         continue;
                     }
                 };
-
+                let ip_data = &buf[4..n]; // пропускаем 4 байта заголовка macOS TUN
                 let packet = wrap_ip_in_ppp_sstp(&buf);
                 let mut writer = writer.lock().await;
-                if let Err(e) = writer.write_all(&packet).await {
+                if let Err(e) = writer.write_all(&ip_data).await {
                     eprintln!("❌ Ошибка записи в SSTP: {e}");
                 }
-                //println!("success write to sstp stream...")
             }
         });
     }
