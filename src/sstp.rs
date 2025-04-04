@@ -39,8 +39,8 @@ pub async fn read_and_parse_all<R: AsyncRead + Unpin>(
         let mut buf = [0u8; 1600];
         let n = stream.read(&mut buf).await?;
 
-        println!("🔍 Получено {} байт из stream", n);
-        println!("🔍 Буфер: {:02X?}", &buf[..n]);
+        //println!("🔍 Получено {} байт из stream", n);
+        //println!("🔍 Буфер: {:02X?}", &buf[..n]);
 
         if n == 0 {
             return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "SSTP закрылся"));
@@ -578,7 +578,7 @@ pub async fn read_and_parse<R: AsyncReadExt + Unpin>(
 ) -> Option<PppParsedFrame> {
     match stream.read(buf).await {
         Ok(n) if n > 0 => {
-            println!("📥 Получено ({} байт): {:02X?}", n, &buf[..n]);
+            // ({} байт): {:02X?}", n, &buf[..n]);
             parse_sstp_data_packet(&buf[..n])
         }
         Ok(_) => {
@@ -765,3 +765,20 @@ pub fn build_sstp_ppp_lcp_request_with_options(id: u8) -> (Vec<u8>, Vec<u8>) {
 
     (sstp, opts)
 }
+
+pub fn build_lcp_configure_request_filtered_with_mru(
+    id: u8,
+    mru: [u8; 2],
+) -> (Vec<u8>, Vec<u8>) {
+    let mut options = Vec::new();
+
+    // Option 1: MRU
+    options.extend_from_slice(&[0x01, 0x04, mru[0], mru[1]]);
+
+    let payload = options.clone(); // сохраняем до упаковки
+
+    let packet = wrap_lcp_packet(0x01, id, &options); // 0x01 = Configure-Request
+
+    (packet, payload)
+}
+

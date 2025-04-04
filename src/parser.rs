@@ -29,7 +29,7 @@ pub fn parse_ppp_frame(buf: &[u8]) -> Option<PppParsedFrame> {
 
     let payload = buf[12..12 + (length as usize - 4)].to_vec();
 
-    println!("✅ Распознан PPP пакет: proto={:#06X}, code={:#04X}, id={}, payload={:02X?}", protocol, code, id, payload);
+    //println!("✅ Распознан PPP пакет: proto={:#06X}, code={:#04X}, id={}, payload={:02X?}", protocol, code, id, payload);
 
     Some(PppParsedFrame {
         protocol,

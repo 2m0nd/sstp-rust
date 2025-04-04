@@ -56,13 +56,14 @@ enum PppState {
     WaitIpcpNakWithOffer,
     WaitIpcpFinalAck,
     WaitLcpAck,
+    WaitLcpNak,
     Error(String),
 }
 
 /// Лог отправки пакета
 fn log_send(label: &str, packet: &[u8], state: &PppState) {
-    println!("📤 {:?} → отправлено ({} байт): {:02X?}", state, packet.len(), packet);
-    println!("🔄 Текущий state: {:?}", state);
+    //println!("📤 {:?} → отправлено ({} байт): {:02X?}", state, packet.len(), packet);
+    //println!("🔄 Текущий state: {:?}", state);
 }
 
 #[tokio::main]
@@ -136,6 +137,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             PppState::WaitLcpRequest |
             PppState::WaitLcpReject |
             PppState::WaitPapAck |
+            PppState::WaitLcpNak |
             PppState::WaitLcpAck |
             PppState::WaitIpcpFinalAck |
             PppState::WaitIpcpRequest |
@@ -190,33 +192,82 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             PppState::WaitLcpReject => {
-                if let Some(ppp) = take_matching_packet(&mut pending_packets, |p| p.protocol == 0xC021 && p.code == 0x04) {
-                    log_line(&format!("Received LCP Configure-Reject #{}", ppp.id));
-            
-                    for (opt_type, opt_data) in extract_all_lcp_options(&ppp.payload) {
-                        log_recv_lcp(ppp.id, opt_type, &opt_data);
-                    }
-            
+                if let Some(ppp) = take_matching_packet(
+                    &mut pending_packets, |p| p.protocol == 0xC021 && p.code == 0x04) {
                     let rejected_opts = extract_all_lcp_option_types(&ppp.payload);
-                    let new_req = build_lcp_configure_request_filtered(id_counter, &rejected_opts);
-            
-                    stream.write_all(&new_req).await?;
-                    log_line(&format!("Send LCP Configure-Request #{}", id_counter));
-            
-                    for (opt_type, opt_data) in extract_all_lcp_options(&new_req[8..]) {
-                        log_send_lcp(id_counter, opt_type, &opt_data);
+                    let old_payload = sent_lcp_requests.get(&ppp.id).cloned();
+
+                    // 🧾 Логируем заголовок Reject
+                    log_line(&format!("Received LCP Configure-Reject #{}", ppp.id));
+
+                    // 🧾 Логируем каждую отклонённую опцию
+                    for (typ, data) in extract_all_lcp_options(&ppp.payload) {
+                        log_recv_lcp(ppp.id, typ, &data);
                     }
+
+                    if let Some(payload) = old_payload {
+
+
+                        let filtered_payload = remove_rejected_lcp_options(&payload, &rejected_opts);
+                        let new_req = wrap_lcp_packet(0x01, id_counter, &filtered_payload);
+                        stream.write_all(&new_req).await?;
+
+                        log_line(&format!("Send LCP Configure-Request #{}", id_counter));
+                        for (typ, data) in extract_all_lcp_options(&filtered_payload) {
+                            log_send_lcp(id_counter, typ, &data);
+                        }
+
+                        id_counter += 1;
+                        state = PppState::WaitLcpNak;
+                    } else {
+                        state = PppState::Error("Не найден исходный LCP по ID".into());
+                    }
+                } else {
+                    continue;
+                }
+            }
+
+            PppState::WaitLcpNak => {
+                if let Some(ppp) = take_matching_packet(
+                    &mut pending_packets, |p| p.protocol == 0xC021 && p.code == 0x03
+                ) {
+                    log_line(&format!("Received LCP Configure-Nak #{}", ppp.id));
             
-                    id_counter += 1;
-                    state = PppState::WaitLcpAck;
+                    if let Some(mru) = extract_option_value_u16(&ppp.payload, 0x01) {
+                        log_recv_lcp(ppp.id, 0x01, &mru);
+            
+                        let (new_req, options_payload) = build_lcp_configure_request_filtered_with_mru(id_counter, mru);
+                        log_line(&format!("Send LCP Configure-Request #{}", id_counter));
+                        log_send_lcp(id_counter, 0x01, &mru);
+            
+                        stream.write_all(&new_req).await?;
+                        log_send("LCP Configure-Request (after NAK)", &new_req, &state);
+                        sent_lcp_requests.insert(id_counter, options_payload.clone());
+
+                        id_counter += 1;
+                        state = PppState::WaitLcpAck;
+                    } else {
+                        state = PppState::Error("LCP NAK без MRU".into());
+                    }
                 } else {
                     continue;
                 }
             }
 
             PppState::WaitLcpAck => {
-                if let Some(ppp) = take_matching_packet(&mut pending_packets, |p| p.protocol == 0xC021 && p.code == 0x02) {
-                    println!("✅ Получен LCP Configure-Ack #{}", ppp.id);
+                if let Some(ppp) = take_matching_packet(
+                    &mut pending_packets, |p| p.protocol == 0xC021 && p.code == 0x02) {
+                    log_line(&format!("Received LCP Configure-Ack #{}", ppp.id));
+            
+                    if let Some(sent_payload) = sent_lcp_requests.get(&ppp.id) {
+                        for (typ, val) in extract_all_lcp_options(sent_payload) {
+                            log_recv_lcp(ppp.id, typ, &val);
+                        }
+                    } else {
+                        log_line("⚠️ Не найден отправленный LCP Request для логирования опций");
+                    }
+            
+                    log_line("LCP configuration done");
                     state = PppState::SendPapAuth;
                 } else {
                     continue;
