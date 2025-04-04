@@ -2,6 +2,7 @@ mod sstp;
 use std::io;
 use std::io::Read;
 use std::io::Write;
+use std::net::Ipv4Addr;
 use anyhow::Result;
 mod parser;
 mod ssl_verifiers;
@@ -25,6 +26,8 @@ use tokio_rustls::rustls::{
 use tokio::{io::{ split, ReadHalf, WriteHalf}};
 use tun::{platform::Device as Tun};
 use tokio_rustls::client::TlsStream;
+mod dhcp;
+use dhcp::*;
 
 #[derive(Debug)]
 pub struct PppSessionInfo {
@@ -109,6 +112,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut buf = [0u8; 1500];
     let mut state = PppState::SendLcpRequest;
     let mut id_counter: u8 = 1;
+
+    let mut session_info: Option<PppSessionInfo> = None;
 
     loop {
         let ppp = match state {
@@ -263,7 +268,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         );
                     }
             
-                    let session_info = PppSessionInfo { ip, dns1, dns2 };
+                    session_info = Some(PppSessionInfo { ip, dns1, dns2 });
             
                     println!("✅ Сессия установлена: {session_info:#?}");
 
@@ -292,42 +297,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("____________________________");
     }
 
+    perform_dhcp_handshake(&mut stream, session_info).await?;
 
-    // let mut echo_stream = stream.clone(); // до split (или передай сюда echo task до split)
+    //setup_and_start_tunnel(stream).await?;
 
-    // tokio::spawn(async move {
-    //     let mut buf = [0u8; 1600];
-    //     loop {
-    //         match echo_stream.read(&mut buf).await {
-    //             Ok(0) => {
-    //                 println!("🔌 Сервер закрыл соединение");
-    //                 break;
-    //             }
-    //             Ok(n) if buf[..n].starts_with(&[0x10, 0x01]) && buf[4..6] == [0x00, 0x05] => {
-    //                 println!("📶 Получен SSTP ECHO_REQUEST");
-    //                 let response = build_sstp_echo_response();
-    //                 if let Err(e) = echo_stream.write_all(&response).await {
-    //                     eprintln!("❌ Ошибка отправки ECHO_RESPONSE: {e}");
-    //                     break;
-    //                 }
-    //                 println!("✅ Отправлен ECHO_RESPONSE");
-    //             }
-    //             Ok(_) => {
-    //                 // Пропускаем другие Control Messages
-    //             }
-    //             Err(e) => {
-    //                 eprintln!("❌ Ошибка чтения SSTP control: {e}");
-    //                 break;
-    //             }
-    //         }
-    //     }
-    // });
+    //println!("🟢 TUN активен, туннелирование запущено. Ждём трафик...");
 
-    setup_and_start_tunnel(stream).await?;
-
-    println!("🟢 TUN активен, туннелирование запущено. Ждём трафик...");
-
-    tokio::signal::ctrl_c().await.expect("Failed to listen for ctrl-c");
+    //tokio::signal::ctrl_c().await.expect("Failed to listen for ctrl-c");
     
     Ok(())
 }
@@ -424,9 +400,6 @@ pub async fn start_tun_forwarding(
                     }
                 };
 
-
-                println!("Что то получили ({} байт): {:02X?}", n, &buf[..n]);
-
                 if buf[..n].starts_with(&[0x10, 0x01]) && buf[4..6] == [0x00, 0x05]
                 {
                     println!("📶 Получен SSTP ECHO_REQUEST");
@@ -442,7 +415,6 @@ pub async fn start_tun_forwarding(
                 if let Some(ip_data) = parse_ppp_ip_packet(&buf[..n]) {
                     let ip_data = ip_data.to_vec(); // выделяем для send в blocking
                     let dev = dev.clone();
-
                     tokio::task::spawn_blocking(move || {
                         let mut dev = dev.lock().unwrap();
                         dev.write_all(&ip_data)
@@ -454,6 +426,59 @@ pub async fn start_tun_forwarding(
         });
 
         println!("Thread reading and writing started.")
+    }
+
+    Ok(())
+}
+
+pub async fn perform_dhcp_handshake(
+    stream: &mut TlsStream<TcpStream>,
+    client_ip: [u8; 4],
+) -> std::io::Result<()> {
+    println!("📡 Отправляем DHCP INFORM...");
+
+    let dhcp_packet = build_dhcp_inform_packet(client_ip);
+    let sstp_packet = wrap_ip_in_ppp_sstp(&dhcp_packet);
+
+    stream.write_all(&sstp_packet).await?;
+
+    let mut buf = [0u8; 1600];
+
+    loop {
+        let n = stream.read(&mut buf).await?;
+        if n == 0 {
+            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "SSTP закрыт"));
+        }
+        
+        println!("📦 RAW: {:02X?}", &buf[..n]);
+
+        // Или вытащи вручную payload из PPP/IP
+        if buf.len() >= 8 && buf[4] == 0xFF && buf[5] == 0x03 && buf[6] == 0x00 && buf[7] == 0x21 {
+            let ip = &buf[8..];
+            if ip[9] == 0x11 { // UDP
+                let src = format!("{}.{}.{}.{}", ip[12], ip[13], ip[14], ip[15]);
+                let dst = format!("{}.{}.{}.{}", ip[16], ip[17], ip[18], ip[19]);
+                let sport = u16::from_be_bytes([ip[20], ip[21]]);
+                let dport = u16::from_be_bytes([ip[22], ip[23]]);
+
+                println!("📡 UDP {}:{} → {}:{}", src, sport, dst, dport);
+
+                if dport == 68 {
+                    let dhcp = &ip[28..];
+                    println!("📨 DHCP?: {:02X?}", dhcp);
+                }
+            }
+        }
+
+        if let Some(ip_packet) = parse_ppp_ip_packet(&buf[..n]) {
+            if let Some(dhcp_info) = try_parse_dhcp_ack(ip_packet) {
+                println!("✅ DHCP Ack получен:");
+                println!("   🌐 DNS: {}", Ipv4Addr::from(dhcp_info.dns));
+                println!("   🛣  Gateway: {}", Ipv4Addr::from(dhcp_info.gateway));
+                println!("   🧱 Subnet: {}", Ipv4Addr::from(dhcp_info.subnet_mask));
+                break;
+            }
+        }
     }
 
     Ok(())

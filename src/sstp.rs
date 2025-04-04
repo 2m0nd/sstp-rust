@@ -603,7 +603,9 @@ pub fn extract_all_ipcp_options(payload: &[u8]) -> HashMap<u8, [u8; 4]> {
 }
 
 pub fn wrap_ip_in_ppp_sstp(ip_data: &[u8]) -> Vec<u8> {
-    print!("out packet-->>");
+    let n = ip_data.len();
+    println!("[TUN->>SSTP] ({} байт): {:02X?}", n, &ip_data[..n]);
+
     let mut ppp = vec![
         0xFF, 0x03, // Address + Control
         0x00, 0x21, // Protocol = IP
@@ -621,7 +623,8 @@ pub fn wrap_ip_in_ppp_sstp(ip_data: &[u8]) -> Vec<u8> {
 }
 
 pub fn parse_ppp_ip_packet(buf: &[u8]) -> Option<&[u8]> {
-    print!("<--in packet");
+    let n = buf.len();
+    println!("[SSTP->>TUN] ({} байт): {:02X?}", n, &buf[..n]);
 
     if buf.len() < 8 {
         return None;
