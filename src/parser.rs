@@ -1,5 +1,10 @@
 // src/parser.rs
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use crate::DEBUG_PARSE;
+
+
 pub struct PppParsedFrame {
     pub protocol: u16,
     pub code: u8,
@@ -28,8 +33,13 @@ pub fn parse_ppp_frame(buf: &[u8]) -> Option<PppParsedFrame> {
     }
 
     let payload = buf[12..12 + (length as usize - 4)].to_vec();
-
-    //println!("✅ Распознан PPP пакет: proto={:#06X}, code={:#04X}, id={}, payload={:02X?}", protocol, code, id, payload);
+    
+    match DEBUG_PARSE.load(Ordering::Relaxed) {
+        true => {
+            println!("✅ Распознан PPP пакет: proto={:#06X}, code={:#04X}, id={}, payload={:02X?}", protocol, code, id, payload);
+        }
+        false => (),
+    }
 
     Some(PppParsedFrame {
         protocol,
@@ -145,4 +155,9 @@ pub fn extract_all_lcp_options(payload: &[u8]) -> Vec<(u8, Vec<u8>)> {
         i += len;
     }
     result
+}
+
+pub fn to_array_4(vec: Vec<u8>) -> [u8; 4] {
+    let slice = vec.as_slice();
+    [slice[0], slice[1], slice[2], slice[3]]
 }

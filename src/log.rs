@@ -13,10 +13,22 @@ pub fn log_send_lcp(id: u8, option_type: u8, data: &[u8]) {
     log_line(&format!("Send LCP #{} Option={} Data={}", id, option_type, hex_str));
 }
 
+/// Лог отправки LCP опции
+pub fn log_send_ipcp(id: u8, option_type: u8, data: &[u8]) {
+    let hex_str = data.iter().map(|b| format!("{:02X}", b)).collect::<String>();
+    log_line(&format!("Send IPCP #{} Option={} Data={}", id, option_type, hex_str));
+}
+
+/// Лог отправки LCP опции
+pub fn log_recv_ipcp(id: u8, option_type: u8, data: &[u8]) {
+    let hex_str = data.iter().map(|b| format!("{:02X}", b)).collect::<String>();
+    log_line(&format!("Received IPCP *{} Option={} Data={}", id, option_type, hex_str));
+}
+
 /// Лог получения LCP опции
 pub fn log_recv_lcp(id: u8, option_type: u8, data: &[u8]) {
     let hex_str = data.iter().map(|b| format!("{:02X}", b)).collect::<String>();
-    log_line(&format!("Received LCP #{} Option={} Data={}", id, option_type, hex_str));
+    log_line(&format!("Received LCP *{} Option={} Data={}", id, option_type, hex_str));
 }
 
 /// Лог отправки пакета

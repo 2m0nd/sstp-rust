@@ -1,6 +1,7 @@
 mod sstp;
 mod log;
 use log::*;
+use sstp_rust::DEBUG_PARSE;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::io;
@@ -32,6 +33,7 @@ use tun::{platform::Device as Tun};
 use tokio_rustls::client::TlsStream;
 mod dhcp;
 use dhcp::*;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Debug)]
 pub struct PppSessionInfo {
@@ -42,6 +44,7 @@ pub struct PppSessionInfo {
 
 #[derive(Debug)]
 enum PppState {
+    WAIT_WAIT,
     SendLcpRequest,
     WaitLcpRequest,
     SendLcpAck,
@@ -54,6 +57,7 @@ enum PppState {
     Done,
     WaitIpcpResponse,
     WaitIpcpNakWithOffer,
+    WaitIpcpReject,
     WaitIpcpFinalAck,
     WaitLcpAck,
     WaitLcpNak,
@@ -134,6 +138,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --- Основной FSM цикл ---
     loop {
         if matches!(state,
+            PppState::WAIT_WAIT |
             PppState::WaitLcpRequest |
             PppState::WaitLcpReject |
             PppState::WaitPapAck |
@@ -141,6 +146,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             PppState::WaitLcpAck |
             PppState::WaitIpcpFinalAck |
             PppState::WaitIpcpRequest |
+            PppState::WaitIpcpReject |
             PppState::WaitIpcpNakWithOffer
         ) {
             read_and_parse_all(&mut stream, &mut leftover_buf, &mut pending_packets).await?;
@@ -276,6 +282,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             PppState::SendPapAuth => {
                 log_line("Verifying login credentials");
+                id_counter = 0;
                 log_line(&format!("Send PAP Request #{}", id_counter));
             
                 let auth = wrap_ppp_pap_packet(id_counter, user, pwd);
@@ -303,23 +310,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             PppState::SendIpcpRequest => {
+                log_line("Start IPCP negotiation");
+                id_counter = 3;
+            
                 let ipcp = build_ipcp_configure_request_packet(id_counter);
+                log_line(&format!("Send IPCP Configure-Request #{}", id_counter));
+                log_line("Memory usage: 6.9MB"); // приближение к реальному выводу
+            
+                // println!("🔍 IPCP packet size: {}", ipcp.len());
+                // println!("🔍 First 16 bytes: {:02X?}", &ipcp[..16.min(ipcp.len())]);
+
+                // Срезаем SSTP + PPP
+                let ipcp_payload = if ipcp.len() >= 8 {
+                    &ipcp[8..]
+                } else {
+                    state = PppState::Error("IPCP packet слишком короткий для анализа".into());
+                    continue;
+                };
+            
+                let options = &ipcp_payload[4..]; // пропускаем Code, ID, Length
+                for (option_type, data) in extract_all_ipcp_options(options) {
+                    log_send_ipcp(id_counter, option_type, &data); // или log_send_ipcp()
+                }
+            
                 stream.write_all(&ipcp).await?;
                 log_send("IPCP Request", &ipcp, &state);
+            
                 id_counter += 1;
                 state = PppState::WaitIpcpRequest;
             }
 
             PppState::WaitIpcpRequest => {
                 if let Some(ppp) = take_matching_packet(&mut pending_packets, |p| p.protocol == 0x8021 && p.code == 0x01) {
-                    println!("📥 IPCP Configure-Request: ID={}, len={}", ppp.id, ppp.length);
+                    log_line(&format!("Received IPCP Configure-Request *{}", ppp.id));
+            
+                    // Пропускаем заголовок IPCP (4 байта: Code, ID, Length)
+                    for (opt_type, data) in extract_all_ipcp_options(&ppp.payload) {
+                        log_recv_ipcp(ppp.id, opt_type, &data);
+                    }
 
                     if let Some(ip) = extract_option_value_u32(&ppp.payload, 0x03) {
-                        println!("📦 Сервер предлагает IP: {}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
                         let ack = build_ipcp_configure_ack(ppp.id, ip);
+                        log_line(&format!("Send IPCP Configure-Ack *{}", ppp.id));
+                        log_send_ipcp(ppp.id, 0x03, &ip);
+                        log_line(&format!("Peer IP {}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]));            
                         stream.write_all(&ack).await?;
                         log_send("IPCP Ack", &ack, &state);
-                        state = PppState::WaitIpcpNakWithOffer;
+                        state = PppState::WaitIpcpReject;
                     } else {
                         state = PppState::Error("IPCP Configure-Request без IP-опции".into());
                     }
@@ -328,16 +365,56 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
+            PppState::WaitIpcpReject => {
+                if let Some(ppp) = take_matching_packet(&mut pending_packets, |p| p.protocol == 0x8021 && p.code == 0x04) {
+                    log_line(&format!("Received IPCP Configure-Reject #{}", ppp.id));
+            
+                    // Показываем все отклонённые опции
+                    for (opt_type, data) in extract_all_ipcp_options(&ppp.payload) {
+                        log_recv_ipcp(ppp.id, opt_type, &data);
+                    }
+            
+                    // Теперь формируем новый запрос без этих опций
+                    let rejected_types: Vec<u8> = extract_all_ipcp_options(&ppp.payload).keys().copied().collect();
+                    let new_ipcp = build_ipcp_request_filtered(id_counter, &rejected_types);
+            
+                    log_line(&format!("Send IPCP Configure-Request #{}", id_counter));
+            
+                    let ipcp_payload = &new_ipcp[8..]; // Без SSTP и PPP заголовков
+                    for (opt_type, data) in extract_all_ipcp_options(ipcp_payload) {
+                        log_send_ipcp(id_counter, opt_type, &data);
+                    }
+            
+                    stream.write_all(&new_ipcp).await?;
+                    log_send("IPCP Request (after Reject)", &new_ipcp, &state);
+            
+                    id_counter += 1;
+                    state = PppState::WaitIpcpNakWithOffer;
+                } else {
+                    continue;
+                }
+            }
+
             PppState::WaitIpcpNakWithOffer => {
                 if let Some(ppp) = take_matching_packet(&mut pending_packets, |p| p.protocol == 0x8021 && p.code == 0x03) {
-                    println!("📥 Получен IPCP Configure-Nak (ID = {})", ppp.id);
-                    for (k, v) in extract_all_ipcp_options(&ppp.payload) {
-                        println!("🔧 option {} → {}.{}.{}.{}", k, v[0], v[1], v[2], v[3]);
+                    log_line(&format!("Received IPCP Configure-Nak #{}", ppp.id));
+            
+                    let nak_options = extract_all_ipcp_options(&ppp.payload);
+                    for (typ, data) in &nak_options {
+                        log_recv_lcp(ppp.id, *typ, data);
                     }
-                    let ip = extract_option_value_u32(&ppp.payload, 0x03).unwrap_or([0, 0, 0, 0]);
-                    let req = build_ipcp_request_with_only_ip(ip, id_counter);
-                    stream.write_all(&req).await?;
-                    log_send("IPCP Request (final)", &req, &state);
+            
+                    let ip = to_array_4(nak_options.get(&3).cloned().unwrap_or(vec![0, 0, 0, 0]));
+                    let dns = to_array_4(nak_options.get(&129).cloned().unwrap_or(vec![0, 0, 0, 0]));
+            
+                    log_line(&format!("Send IPCP Configure-Request #{}", id_counter));
+                    log_send_ipcp(id_counter, 3, &ip);
+                    log_send_ipcp(id_counter, 129, &dns);
+            
+                    let final_ipcp = build_ipcp_request_with_ip_and_dns(id_counter, ip, dns);
+                    stream.write_all(&final_ipcp).await?;
+                    log_send("IPCP Request (final)", &final_ipcp, &state);
+            
                     id_counter += 1;
                     state = PppState::WaitIpcpFinalAck;
                 } else {
@@ -347,17 +424,54 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             PppState::WaitIpcpFinalAck => {
                 if let Some(ppp) = take_matching_packet(&mut pending_packets, |p| p.protocol == 0x8021 && p.code == 0x02) {
+                    log_line(&format!("Received IPCP Configure-Ack #{}", ppp.id));
+            
                     let opts = extract_all_ipcp_options(&ppp.payload);
-                    let ip = opts.get(&0x03).copied().unwrap_or([0, 0, 0, 0]);
-                    let dns1 = opts.get(&0x81).copied();
-                    let dns2 = opts.get(&0x83).copied();
+            
+                    for (typ, data) in &opts {
+                        log_recv_lcp(ppp.id, *typ, data);
+                    }
+            
+                    let ip = match opts.get(&0x03) {
+                        Some(vec) if vec.len() == 4 => [vec[0], vec[1], vec[2], vec[3]],
+                        _ => [0, 0, 0, 0],
+                    };
+                    let dns1 = match opts.get(&0x81) {
+                        Some(vec) if vec.len() == 4 => Some([vec[0], vec[1], vec[2], vec[3]]),
+                        _ => None,
+                    };
+                    let dns2 = match opts.get(&0x83) {
+                        Some(vec) if vec.len() == 4 => Some([vec[0], vec[1], vec[2], vec[3]]),
+                        _ => None,
+                    };
+            
+                    log_line(&format!("Local IP {}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]));
+                    if let Some(dns1) = dns1 {
+                        log_line(&format!("Primary DNS {}.{}.{}.{}", dns1[0], dns1[1], dns1[2], dns1[3]));
+                    }
+                    if let Some(dns2) = dns2 {
+                        log_line(&format!("Secondary DNS {}.{}.{}.{}", dns2[0], dns2[1], dns2[2], dns2[3]));
+                    }
+            
+                    log_line("IPCP configuration done");
+            
                     session_info = Some(PppSessionInfo { ip, dns1, dns2 });
-                    println!("✅ Сессия установлена: {session_info:#?}");
-                    state = PppState::Done;
+                    
+                    //смотрим че дальше летает с этого момента
+                    DEBUG_PARSE.store(true, Ordering::Relaxed);
+                    
+                    state = PppState::WAIT_WAIT;
+            
                 } else {
                     continue;
                 }
             }
+
+            PppState::WAIT_WAIT => {
+                    println!("Что то прилетело?");
+                    
+            }
+            
 
             PppState::Done => {
                 println!("🎉 Соединение установлено!");

@@ -482,27 +482,31 @@ pub fn wrap_ppp_pap_packet(id: u8, username: &str, password: &str) -> Vec<u8> {
 
 /// Строит SSTP Data пакет с PPP IPCP Configure-Request (IP Address = 0.0.0.0)
 pub fn build_ipcp_configure_request_packet(id: u8) -> Vec<u8> {
+    let mut payload = Vec::new();
+
+    // Option 131: Secondary DNS Request
+    payload.extend_from_slice(&[131, 6, 0x00, 0x00, 0x00, 0x00]);
+
+    // Option 3: Request IP Address
+    payload.extend_from_slice(&[3, 6, 0x00, 0x00, 0x00, 0x00]);
+
+    // Option 129: Primary DNS Request
+    payload.extend_from_slice(&[129, 6, 0x00, 0x00, 0x00, 0x00]);
+
+    let length = (4 + payload.len()) as u16;
+
     let mut ppp = Vec::new();
+    ppp.extend_from_slice(&[0xFF, 0x03]); // PPP Address + Control
+    ppp.extend_from_slice(&[0x80, 0x21]); // IPCP Protocol
+    ppp.push(0x01);                       // Code: Configure-Request
+    ppp.push(id);                         // ID
+    ppp.extend_from_slice(&length.to_be_bytes()); // Length
+    ppp.extend_from_slice(&payload);      // Payload
 
-    // === PPP Header ===
-    ppp.extend_from_slice(&[0xFF, 0x03]);       // Address + Control
-    ppp.extend_from_slice(&[0x80, 0x21]);       // Protocol = IPCP (0x8021)
-
-    // === IPCP Configure-Request ===
-    let payload = [
-        0x01,                   // Code = Configure-Request
-        id,                    // Identifier
-        0x00, 0x0A,             // Length = 10 bytes
-        0x03, 0x06,             // Option: IP Address (type=3, len=6)
-        0x00, 0x00, 0x00, 0x00,  // IP Address = 0.0.0.0 (мы просим у сервера)
-    ];
-    ppp.extend_from_slice(&payload);
-
-    // === SSTP Header ===
     let total_len = (ppp.len() + 4) as u16;
     let mut sstp = Vec::new();
-    sstp.push(0x10); // Version 1.0
-    sstp.push(0x00); // C = 0 (Data)
+    sstp.push(0x10);                      // SSTP Version
+    sstp.push(0x00);                      // Flags
     sstp.extend_from_slice(&total_len.to_be_bytes());
     sstp.extend_from_slice(&ppp);
 
@@ -602,7 +606,7 @@ pub fn build_sstp_call_connected_packet() -> Vec<u8> {
     ]
 }
 
-pub fn extract_all_ipcp_options(payload: &[u8]) -> HashMap<u8, [u8; 4]> {
+pub fn extract_all_ipcp_options(payload: &[u8]) -> HashMap<u8, Vec<u8>> {
     let mut options = HashMap::new();
     let mut i = 0;
 
@@ -610,24 +614,17 @@ pub fn extract_all_ipcp_options(payload: &[u8]) -> HashMap<u8, [u8; 4]> {
         let opt_type = payload[i];
         let len = payload[i + 1] as usize;
 
+        // Защита от повреждений
         if len < 2 || i + len > payload.len() {
-            println!("⚠️ IPCP option повреждена или выходит за границы: type={}, len={}", opt_type, len);
+            println!(
+                "⚠️ IPCP option повреждена или выходит за границы: type={}, len={}",
+                opt_type, len
+            );
             break;
         }
 
-        if len == 6 {
-            options.insert(
-                opt_type,
-                [
-                    payload[i + 2],
-                    payload[i + 3],
-                    payload[i + 4],
-                    payload[i + 5],
-                ],
-            );
-        } else {
-            println!("ℹ️ Пропущена опция длиной {}, тип {}", len, opt_type);
-        }
+        let data = &payload[i + 2..i + len];
+        options.insert(opt_type, data.to_vec());
 
         i += len;
     }
@@ -782,3 +779,74 @@ pub fn build_lcp_configure_request_filtered_with_mru(
     (packet, payload)
 }
 
+pub fn build_ipcp_request_filtered(id: u8, exclude_types: &[u8]) -> Vec<u8> {
+    let mut options = Vec::new();
+
+    // Опции по умолчанию
+    let default_options = vec![
+        (3,   vec![0, 0, 0, 0]), // Router
+        (129, vec![0, 0, 0, 0]), // Primary DNS
+    ];
+
+    for (typ, data) in default_options {
+        if exclude_types.contains(&typ) {
+            continue;
+        }
+
+        let len = (2 + data.len()) as u8;
+        options.push(typ);
+        options.push(len);
+        options.extend_from_slice(&data);
+    }
+
+    let total_len = (4 + options.len()) as u16;
+
+    let mut ppp = vec![
+        0xFF, 0x03,             // PPP header
+        0x80, 0x21,             // Protocol: IPCP
+        0x01, id,               // Configure-Request, ID
+    ];
+    ppp.extend_from_slice(&total_len.to_be_bytes());
+    ppp.extend_from_slice(&options);
+
+    let mut sstp = vec![0x10, 0x00];
+    let sstp_len = (ppp.len() + 4) as u16;
+    sstp.extend_from_slice(&sstp_len.to_be_bytes());
+    sstp.extend_from_slice(&ppp);
+
+    sstp
+}
+
+pub fn build_ipcp_request_with_ip_and_dns(id: u8, ip: [u8; 4], dns: [u8; 4]) -> Vec<u8> {
+    let mut payload = Vec::new();
+
+    // Option 3 — IP Address (Router)
+    payload.push(3); // type
+    payload.push(6); // length
+    payload.extend_from_slice(&ip);
+
+    // Option 129 — Primary DNS
+    payload.push(129); // type
+    payload.push(6);   // length
+    payload.extend_from_slice(&dns);
+
+    // PPP LCP Packet
+    let length = (4 + payload.len()) as u16;
+    let mut ppp = Vec::new();
+    ppp.extend_from_slice(&[0xFF, 0x03]);       // PPP Address + Control
+    ppp.extend_from_slice(&[0x80, 0x21]);       // Protocol: IPCP
+    ppp.push(0x01);                             // Code: Configure-Request
+    ppp.push(id);                               // ID
+    ppp.extend_from_slice(&length.to_be_bytes());// Length
+    ppp.extend_from_slice(&payload);            // Options
+
+    // SSTP wrapper
+    let total_len = (ppp.len() + 4) as u16;
+    let mut sstp = Vec::new();
+    sstp.push(0x10);                            // SSTP version
+    sstp.push(0x00);                            // Control bit
+    sstp.extend_from_slice(&total_len.to_be_bytes());
+    sstp.extend_from_slice(&ppp);
+
+    sstp
+}
