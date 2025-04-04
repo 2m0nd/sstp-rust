@@ -1,8 +1,132 @@
+use rand::Rng;
+use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt;
 use uuid::Uuid;
 use crate::parser::parse_ppp_frame;
 use crate::parser::PppParsedFrame;
 use std::collections::HashMap;
+use std::collections::VecDeque;
+use tokio::{net::TcpStream};
+use tokio_rustls::TlsConnector;
+use tokio_rustls::rustls::{
+    Certificate, ClientConfig, Error as TLSError, ServerName,
+    client::ServerCertVerifier,
+    client::ServerCertVerified,
+};
+use tokio::{io::{ split, ReadHalf, WriteHalf}};
+use tun::{platform::Device as Tun};
+use tokio_rustls::client::TlsStream;
+
+
+pub async fn read_and_parse_all<R: AsyncRead + Unpin>(
+    stream: &mut R,
+    leftover: &mut Vec<u8>,
+    queue: &mut VecDeque<PppParsedFrame>,
+) -> std::io::Result<()> {
+    use tokio::io::AsyncReadExt;
+
+    // 🧪 Обрабатываем то, что осталось
+    if !leftover.is_empty() {
+        let packets = extract_ppp_from_sstp_stream(leftover);
+        if packets.is_empty() {
+            println!("📭 Нет распарсенных PPP пакетов (в leftover)");
+        }
+        queue.extend(packets);
+    }
+
+    // 💤 Если очередь пуста — читаем из стрима
+    if queue.is_empty() {
+        let mut buf = [0u8; 1600];
+        let n = stream.read(&mut buf).await?;
+
+        println!("🔍 Получено {} байт из stream", n);
+        println!("🔍 Буфер: {:02X?}", &buf[..n]);
+
+        if n == 0 {
+            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "SSTP закрылся"));
+        }
+
+        leftover.extend_from_slice(&buf[..n]);
+
+        let packets = extract_ppp_from_sstp_stream(leftover);
+        if packets.is_empty() {
+            println!("📭 Нет распарсенных PPP пакетов (из read)");
+        }
+        queue.extend(packets);
+    }
+
+    Ok(())
+}
+
+
+pub fn take_matching_packet<F>(
+    queue: &mut VecDeque<PppParsedFrame>,
+    matcher: F,
+) -> Option<PppParsedFrame>
+where
+    F: Fn(&PppParsedFrame) -> bool,
+{
+    let index = queue.iter().position(|p| matcher(p))?;
+    Some(queue.remove(index).unwrap())
+}
+
+/// Делит leftover на SSTP фреймы и вытаскивает PPP пакеты
+fn extract_ppp_from_sstp_stream(leftover: &mut Vec<u8>) -> Vec<PppParsedFrame> {
+    let mut parsed = Vec::new();
+    let mut offset = 0;
+
+    while offset + 4 <= leftover.len() {
+        if leftover[offset] != 0x10 {
+            println!("⚠️ Не SSTP фрейм по offset={}", offset);
+            break;
+        }
+
+        let total_len = u16::from_be_bytes([leftover[offset + 2], leftover[offset + 3]]) as usize;
+        if offset + total_len > leftover.len() {
+            break; // фрейм неполный, ждём
+        }
+
+        let sstp_frame = &leftover[offset..offset + total_len];
+        if let Some(ppp) = parse_ppp_frame(sstp_frame) {
+            parsed.push(ppp);
+        }
+
+        offset += total_len;
+    }
+
+    // Убираем обработанную часть из leftover
+    leftover.drain(0..offset);
+    parsed
+}
+
+
+fn parse_all_ppp_packets(buf: &mut Vec<u8>) -> Vec<PppParsedFrame> {
+    let mut packets = Vec::new();
+    let mut i = 0;
+
+    while i + 4 <= buf.len() {
+        if buf[i] != 0x10 || buf[i + 1] != 0x00 {
+            i += 1;
+            continue;
+        }
+
+        let total_len = u16::from_be_bytes([buf[i + 2], buf[i + 3]]) as usize;
+        if i + total_len > buf.len() {
+            break; // ждём больше данных
+        }
+
+        let payload = &buf[i + 4..i + total_len];
+        if let Some(ppp) = parse_ppp_frame(payload) {
+            packets.push(ppp);
+        }
+
+        i += total_len;
+    }
+
+    buf.drain(..i); // убираем использованное
+    packets
+}
+
 
 pub fn build_sstp_hello(correlation_id: Uuid) -> Vec<u8> {
     let mut hello = vec![
@@ -93,34 +217,6 @@ pub fn build_configure_ack(reply_id: u8, options: &[u8]) -> Vec<u8> {
     sstp.extend_from_slice(&ppp);
     sstp
 }
-
-    pub fn build_lcp_configure_request() -> Vec<u8> {
-        let options = vec![
-            0x05, 0x06, 0xC2, 0x23 // CHAP only, no algorithm
-        ];
-
-        let mut ppp = vec![
-            0xFF, 0x03,
-            0xC0, 0x21,
-            0x01,             // Code = Configure-Request
-            0x01,             // ID
-        ];
-
-        let length = (options.len() + 4) as u16;
-        ppp.push((length >> 8) as u8);
-        ppp.push((length & 0xFF) as u8);
-        ppp.extend_from_slice(&options);
-
-        let total_len = ppp.len() + 4;
-        let mut sstp = vec![
-            0x10, 0x00,
-            (total_len >> 8) as u8,
-            (total_len & 0xFF) as u8,
-        ];
-        sstp.extend_from_slice(&ppp);
-        sstp
-    }
-
 
 pub fn build_configure_ack_from_request(request: &[u8]) -> Option<Vec<u8>> {
     const SSTP_HEADER_LEN: usize = 4;
@@ -279,69 +375,6 @@ pub fn build_lcp_configure_request_chap_simple() -> Vec<u8> {
     ];
     sstp.extend_from_slice(&ppp);
     sstp
-}
-
-
-pub fn build_lcp_configure_request_fallback() -> Vec<u8> {
-
-    let options = vec![
-        0x05, 0x06, 0xC2, 0x23 // CHAP only, no algorithm
-    ];
-
-    let mut ppp = vec![
-        0xFF, 0x03,             // Address + Control
-        0xC0, 0x21,             // Protocol: LCP
-        0x01,                   // Code = Configure-Request
-        0x01,                   // Identifier
-        0x00, 0x0A              // Length (10 bytes total)
-    ];
-    ppp.extend_from_slice(&options);
-
-    let total_len = ppp.len() + 4; // SSTP header
-    let mut sstp = vec![
-        0x10, 0x00,
-        (total_len >> 8) as u8,
-        (total_len & 0xFF) as u8,
-    ];
-    sstp.extend_from_slice(&ppp);
-    sstp
-}
-
-pub fn build_sstp_ppp_lcp_request() -> Vec<u8> {
-    let mut buf = Vec::new();
-
-    // ===== SSTP Header =====
-    let version: u8 = 0x10; // Version 1.0
-    let control_bit: u8 = 0x00; // C = 0 → Data packet
-    buf.push(version);
-    buf.push(control_bit);
-
-    // Мы пока не знаем длину полностью, вставим временно 0
-    buf.extend_from_slice(&[0x00, 0x00]);
-
-    // ===== PPP Frame =====
-    buf.push(0xFF); // PPP Address (always 0xFF)
-    buf.push(0x03); // PPP Control (always 0x03)
-    buf.push(0xC0); // Protocol (0xC021 = LCP)
-    buf.push(0x21);
-
-    // LCP Configuration Request
-    buf.push(0x01); // Code: Configure-Request
-    buf.push(0x01); // Identifier
-    buf.extend_from_slice(&[0x00, 0x0C]); // Length = 12 bytes
-
-    // Option: Magic Number
-    buf.push(0x05); // Type: Magic Number
-    buf.push(0x06); // Length: 6
-    buf.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]); // Value: arbitrary magic
-
-    // Обновляем длину пакета в SSTP заголовке (всего байт)
-    let total_len = buf.len() as u16;
-    let len_field = (total_len & 0x0FFF) | 0x0000; // R = 0
-    buf[2] = (len_field >> 8) as u8;
-    buf[3] = (len_field & 0xFF) as u8;
-
-    buf
 }
 
 pub fn build_lcp_configure_ack(id: u8, payload: &[u8]) -> Vec<u8> {
@@ -604,7 +637,7 @@ pub fn extract_all_ipcp_options(payload: &[u8]) -> HashMap<u8, [u8; 4]> {
 
 pub fn wrap_ip_in_ppp_sstp(ip_data: &[u8]) -> Vec<u8> {
     let n = ip_data.len();
-    println!("[TUN->>SSTP] ({} байт): {:02X?}", n, &ip_data[..n]);
+    println!("SEND:\tWrite to SSTP: ({} байт): {:02X?}", n, &ip_data[..n]);
 
     let mut ppp = vec![
         0xFF, 0x03, // Address + Control
@@ -624,7 +657,7 @@ pub fn wrap_ip_in_ppp_sstp(ip_data: &[u8]) -> Vec<u8> {
 
 pub fn parse_ppp_ip_packet(buf: &[u8]) -> Option<&[u8]> {
     let n = buf.len();
-    println!("[SSTP->>TUN] ({} байт): {:02X?}", n, &buf[..n]);
+    //println!("[SSTP->>TUN] ({} байт): {:02X?}", n, &buf[..n]);
 
     if buf.len() < 8 {
         return None;
@@ -637,4 +670,98 @@ pub fn parse_ppp_ip_packet(buf: &[u8]) -> Option<&[u8]> {
     } else {
         None
     }
+}
+pub fn extract_all_lcp_option_types(payload: &[u8]) -> Vec<u8> {
+    let mut i = 0;
+    let mut types = Vec::new();
+    while i + 2 <= payload.len() {
+        let opt_type = payload[i];
+        let opt_len = payload[i + 1] as usize;
+
+        if opt_len < 2 || i + opt_len > payload.len() {
+            break;
+        }
+
+        types.push(opt_type);
+        i += opt_len;
+    }
+    types
+}
+pub fn build_lcp_configure_request_filtered(id: u8, reject_list: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::new();
+
+    // Option 1: MRU
+    if !reject_list.contains(&0x01) {
+        payload.extend_from_slice(&[0x01, 0x04, 0x05, 0xDC]); // 1500
+    }
+
+    // Option 5: Magic Number
+    if !reject_list.contains(&0x05) {
+        payload.extend_from_slice(&[0x05, 0x04, 0x7B, 0xA7]); // any 2 bytes
+    }
+
+    // Option 7 and 8 — часто отвергаются, можно не включать
+    // Option 3: Authentication Protocol
+    if !reject_list.contains(&0x03) {
+        payload.extend_from_slice(&[0x03, 0x04, 0xC0, 0x23]); // PAP
+    }
+
+    wrap_lcp_packet(0x01, id, &payload)
+}
+
+
+pub fn remove_rejected_lcp_options(payload: &[u8], rejected: &[u8]) -> Vec<u8> {
+    let mut result = Vec::new();
+    let mut i = 0;
+
+    while i + 2 <= payload.len() {
+        let typ = payload[i];
+        let len = payload[i + 1] as usize;
+
+        if len < 2 || i + len > payload.len() {
+            break;
+        }
+
+        if !rejected.contains(&typ) {
+            result.extend_from_slice(&payload[i..i + len]);
+        }
+
+        i += len;
+    }
+
+    result
+}
+
+/// Собирает LCP Configure-Request + возвращает отдельно options
+pub fn build_sstp_ppp_lcp_request_with_options(id: u8) -> (Vec<u8>, Vec<u8>) {
+    let mut opts = Vec::new();
+    let mut rng = rand::thread_rng();
+    let magic = rng.gen::<u32>().to_be_bytes();
+    opts.push(0x07); opts.push(2);              // ACCM (пустая)
+    opts.push(0x05); opts.push(6); opts.extend_from_slice(&magic);
+    opts.push(0x08); opts.push(2);              // Auth callback
+    opts.push(0x01); opts.push(4); opts.extend_from_slice(&[0x0F, 0xFB]);
+
+    // === Сборка PPP + LCP ===
+    let lcp_len = (4 + opts.len()) as u16;
+
+    let mut ppp = Vec::new();
+    ppp.extend_from_slice(&[0xFF, 0x03]); // PPP Address/Control
+    ppp.extend_from_slice(&[0xC0, 0x21]); // PPP Protocol: LCP
+
+    ppp.push(0x01);             // LCP Code: Configure-Request
+    ppp.push(id);               // Identifier
+    ppp.extend_from_slice(&lcp_len.to_be_bytes());
+    ppp.extend_from_slice(&opts);
+
+    // === SSTP Header ===
+    let total_len = (ppp.len() + 4) as u16;
+
+    let mut sstp = Vec::new();
+    sstp.push(0x10); // SSTP Version
+    sstp.push(0x00); // C = 0
+    sstp.extend_from_slice(&total_len.to_be_bytes());
+    sstp.extend_from_slice(&ppp);
+
+    (sstp, opts)
 }
