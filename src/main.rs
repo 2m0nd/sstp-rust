@@ -424,6 +424,9 @@ pub async fn start_tun_forwarding(
                     }
                 };
 
+
+                println!("Что то получили ({} байт): {:02X?}", n, &buf[..n]);
+
                 if buf[..n].starts_with(&[0x10, 0x01]) && buf[4..6] == [0x00, 0x05]
                 {
                     println!("📶 Получен SSTP ECHO_REQUEST");
@@ -433,8 +436,7 @@ pub async fn start_tun_forwarding(
                         eprintln!("❌ Ошибка записи в SSTP: {e}");
                     }
                     println!("✅ Отправлен ECHO_RESPONSE");
-                    
-                    break;
+                    continue;
                 }
 
                 if let Some(ip_data) = parse_ppp_ip_packet(&buf[..n]) {
