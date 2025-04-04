@@ -297,22 +297,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("____________________________");
     }
 
-    perform_dhcp_handshake(&mut stream, session_info).await?;
+    // if let Some(info) = &session_info {
+    //     println!("🌐 IP = {:?}, DNS = {:?}", info.ip, info.dns1);
+    //     perform_dhcp_handshake(&mut stream, info.ip).await?;
+    // } else {
+    //     eprintln!("❌ Стейт-машина не вернула сессию");
+    // }
 
-    //setup_and_start_tunnel(stream).await?;
+    if let Some(info) = &session_info {
+        println!("🌐 IP = {:?}, DNS = {:?}", info.ip, info.dns1);
+        setup_and_start_tunnel(stream, Ipv4Addr::from(info.ip)).await?;
+        println!("🟢 TUN активен, туннелирование запущено. Ждём трафик...");    
+        tokio::signal::ctrl_c().await.expect("Failed to listen for ctrl-c");    
+    } else {
+        eprintln!("❌ Стейт-машина не вернула сессию");
+    }
 
-    //println!("🟢 TUN активен, туннелирование запущено. Ждём трафик...");
-
-    //tokio::signal::ctrl_c().await.expect("Failed to listen for ctrl-c");
-    
     Ok(())
 }
 
 /// Финальный шаг после PPP FSM: создаём TUN и запускаем туннелирование
-pub async fn setup_and_start_tunnel(stream: TlsStream<TcpStream>) -> std::io::Result<()> {
+pub async fn setup_and_start_tunnel(stream: TlsStream<TcpStream>, ip: Ipv4Addr) -> std::io::Result<()> {
     // ✅ Создаём TUN интерфейс
     let mut config = Configuration::default();
-    config.address((192, 168, 30, 11)) // ← подставь реальный, если получен из IPCP
+    config.address(ip)
+          .destination(ip)
           .netmask((255, 255, 255, 0))
           .up();
 
