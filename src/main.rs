@@ -44,23 +44,22 @@ pub struct PppSessionInfo {
 
 #[derive(Debug)]
 enum PppState {
-    WAIT_WAIT,
+    DhcpSendInfo,
+    WaitEchoRequest,
     SendLcpRequest,
     WaitLcpRequest,
-    SendLcpAck,
     WaitLcpReject,
     SendPapAuth,
     WaitPapAck,
     SendIpcpRequest,
     WaitIpcpRequest,
-    SendIpcpAck,
     Done,
-    WaitIpcpResponse,
     WaitIpcpNakWithOffer,
     WaitIpcpReject,
     WaitIpcpFinalAck,
     WaitLcpAck,
     WaitLcpNak,
+    WaitDhcpAck,
     Error(String),
 }
 
@@ -138,7 +137,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // --- Основной FSM цикл ---
     loop {
         if matches!(state,
-            PppState::WAIT_WAIT |
             PppState::WaitLcpRequest |
             PppState::WaitLcpReject |
             PppState::WaitPapAck |
@@ -147,7 +145,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             PppState::WaitIpcpFinalAck |
             PppState::WaitIpcpRequest |
             PppState::WaitIpcpReject |
-            PppState::WaitIpcpNakWithOffer
+            PppState::WaitIpcpNakWithOffer |
+            PppState::WaitEchoRequest |
+            PppState::WaitDhcpAck
         ) {
             read_and_parse_all(&mut stream, &mut leftover_buf, &mut pending_packets).await?;
         }
@@ -476,20 +476,84 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             
                     session_info = Some(PppSessionInfo { ip, dns1, dns2 });
                     
-                    //смотрим че дальше летает с этого момента
-                    DEBUG_PARSE.store(true, Ordering::Relaxed);
-
-                    state = PppState::WAIT_WAIT;
+                    state = PppState::DhcpSendInfo;
             
                 } else {
                     continue;
                 }
             }
 
-            PppState::WAIT_WAIT => {
-                    println!("Что то прилетело?");
-                    
+            PppState::DhcpSendInfo => {
+                log_line("Send DHCP Inform");
+            
+                if let Some(info) = &session_info {
+                    // Собираем DHCP Inform → в PPP-IP-UDP-DHCP
+                    let dhcp_packet = build_dhcp_inform_ppp_packet(info.ip);
+            
+                    // Отправляем его
+                    stream.write_all(&dhcp_packet).await?;
+                    log_send("DHCP Inform", &dhcp_packet, &state);
+            
+                    // Переход в следующее состояние
+                    state = PppState::WaitEchoRequest;
+                } else {
+                    state = PppState::Error("❌ Нет IP-адреса для DHCP".into());
+                }
+            }            
+
+            PppState::WaitEchoRequest =>  {
+                if let Some(ppp) = take_matching_packet(
+                    &mut pending_packets, |p| {
+                    p.protocol == 0xC021 && p.code == 0x09
+                }) {
+                    log_line(&format!("Received LCP Echo Request"));            
+                    let reply = wrap_lcp_packet(0x0A, ppp.id, &ppp.payload); // Echo Reply
+                    stream.write_all(&reply).await?;
+            
+                    log_line("Send LCP Echo Reply");
+                    log_send("LCP Echo Reply", &reply, &state);
+            
+                    // Возвращаемся в ожидание DHCP ACK или следующую задачу
+                    state = PppState::WaitDhcpAck;
+                } else {
+                    continue;
+                }
             }
+
+            PppState::WaitDhcpAck => {
+                if let Some(ppp) = take_matching_packet(&mut pending_packets, |p| p.protocol == 0x0021) {
+                    let payload = &ppp.payload;
+            
+                    if let Some(dhcp_opts) = parse_dhcp_ack_from_ip_payload(payload) {
+                        log_line("Received DHCP Ack");
+            
+                        for (opt, data) in &dhcp_opts {
+                            log_line(&format!("DHCP: Option {:02}={:X?}", opt, data));
+                        }
+            
+                        // Распаковка конкретных значений
+                        if let Some(server_ip) = dhcp_opts.get(&54) {
+                            log_line(&format!("DHCP: Server IP {}.{}.{}.{}", server_ip[0], server_ip[1], server_ip[2], server_ip[3]));
+                        }
+            
+                        if let Some(mask) = dhcp_opts.get(&1) {
+                            log_line(&format!("DHCP: Subnet mask {}.{}.{}.{}", mask[0], mask[1], mask[2], mask[3]));
+                            log_line(&format!("Subnet mask {}.{}.{}.{}", mask[0], mask[1], mask[2], mask[3]));
+                        }
+            
+                        if let Some(dns) = dhcp_opts.get(&6) {
+                            log_line(&format!("DHCP: DNS {}.{}.{}.{}", dns[0], dns[1], dns[2], dns[3]));
+                        }
+                        
+                        state = PppState::Done;
+                    } else {
+                        state = PppState::Error("❌ DHCP Ack parse error".into());
+                    }
+                } else {
+                    continue;
+                }
+            }
+            
             
 
             PppState::Done => {
@@ -508,17 +572,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    //смотрим че дальше летает с этого момента
+    DEBUG_PARSE.store(true, Ordering::Relaxed);
+
 
     if let Some(info) = &session_info {
         println!("🌐 IP = {:?}, DNS = {:?}", info.ip, info.dns1);
         
-        //dhcp?
-        //perform_dhcp_handshake(&mut stream, info.ip).await?;
-
         //tunel start
-        // setup_and_start_tunnel(stream, Ipv4Addr::from(info.ip)).await?;
-        // println!("🟢 TUN активен, туннелирование запущено. Ждём трафик...");    
-        // tokio::signal::ctrl_c().await.expect("Failed to listen for ctrl-c");    
+         setup_and_start_tunnel(stream, Ipv4Addr::from(info.ip)).await?;
+         println!("🟢 TUN активен, туннелирование запущено. Ждём трафик...");    
+         tokio::signal::ctrl_c().await.expect("Failed to listen for ctrl-c");    
     } else {
         eprintln!("❌ Стейт-машина не вернула сессию");
     }
@@ -593,6 +657,7 @@ pub async fn start_tun_forwarding(
                 if let Err(e) = writer.write_all(&packet).await {
                     eprintln!("❌ Ошибка записи в SSTP: {e}");
                 }
+                //println!("success write to sstp stream...")
             }
         });
     }
@@ -606,7 +671,7 @@ pub async fn start_tun_forwarding(
             let mut buf = [0u8; 1600];
             loop {
 
-                println!("Читаем sstp stream");
+                //println!("Читаем sstp stream");
 
                 let n = match reader.read(&mut buf).await {
                     Ok(0) => {
@@ -619,7 +684,7 @@ pub async fn start_tun_forwarding(
                         break;
                     }
                 };
-                println!("RECEIVE\t: ({} байт): {:02X?}", n, &buf[..n]);
+                //println!("RECEIVE\t: ({} байт): {:02X?}", n, &buf[..n]);
 
                 if buf[..n].starts_with(&[0x10, 0x01]) && buf[4..6] == [0x00, 0x05]
                 {
@@ -638,7 +703,8 @@ pub async fn start_tun_forwarding(
                     let dev = dev.clone();
                     tokio::task::spawn_blocking(move || {
                         let mut dev = dev.lock().unwrap();
-                        dev.write_all(&ip_data)
+                        dev.write_all(&ip_data);
+                        println!("Send to tuna size:{} payload={:02X?}", ip_data.len(), ip_data)
                     })
                     .await
                     .ok(); // можно логировать ошибку при необходимости
@@ -654,55 +720,8 @@ pub async fn start_tun_forwarding(
 
 pub async fn perform_dhcp_handshake(
     stream: &mut TlsStream<TcpStream>,
-    client_ip: [u8; 4],
+    sessionInfo: PppSessionInfo,
 ) -> std::io::Result<()> {
-    println!("📡 Отправляем DHCP INFORM...");
-
     
-    let mac = [0xCA, 0x79, 0xEF, 0x5E, 0x8E, 0x9D];
-    let dhcp_packet = build_dhcp_discover_packet(mac);
-    //let dhcp_packet = build_dhcp_inform_packet(client_ip);
-    let sstp_packet = wrap_ip_in_ppp_sstp(&dhcp_packet);
-
-    stream.write_all(&sstp_packet).await?;
-
-    let mut buf = [0u8; 1600];
-
-    loop {
-        let n = stream.read(&mut buf).await?;
-        println!("SSTP stream return: ({} байт): {:02X?}", n, &buf[..n]);
-        if n == 0 {
-            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "SSTP закрыт"));
-        }
-
-        // Или вытащи вручную payload из PPP/IP
-        if buf.len() >= 8 && buf[4] == 0xFF && buf[5] == 0x03 && buf[6] == 0x00 && buf[7] == 0x21 {
-            let ip = &buf[8..];
-            if ip[9] == 0x11 { // UDP
-                let src = format!("{}.{}.{}.{}", ip[12], ip[13], ip[14], ip[15]);
-                let dst = format!("{}.{}.{}.{}", ip[16], ip[17], ip[18], ip[19]);
-                let sport = u16::from_be_bytes([ip[20], ip[21]]);
-                let dport = u16::from_be_bytes([ip[22], ip[23]]);
-
-                println!("📡 UDP {}:{} → {}:{}", src, sport, dst, dport);
-
-                if dport == 68 {
-                    let dhcp = &ip[28..];
-                    println!("📨 DHCP?: {:02X?}", dhcp);
-                }
-            }
-        }
-
-        if let Some(ip_packet) = parse_ppp_ip_packet(&buf[..n]) {
-            if let Some(dhcp_info) = try_parse_dhcp_ack(ip_packet) {
-                println!("✅ DHCP Ack получен:");
-                println!("   🌐 DNS: {}", Ipv4Addr::from(dhcp_info.dns));
-                println!("   🛣  Gateway: {}", Ipv4Addr::from(dhcp_info.gateway));
-                println!("   🧱 Subnet: {}", Ipv4Addr::from(dhcp_info.subnet_mask));
-                break;
-            }
-        }
-    }
-
     Ok(())
 }

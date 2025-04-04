@@ -634,7 +634,7 @@ pub fn extract_all_ipcp_options(payload: &[u8]) -> HashMap<u8, Vec<u8>> {
 
 pub fn wrap_ip_in_ppp_sstp(ip_data: &[u8]) -> Vec<u8> {
     let n = ip_data.len();
-    println!("SEND:\tWrite to SSTP: ({} байт): {:02X?}", n, &ip_data[..n]);
+    //println!("SEND:\tWrite to SSTP: ({} байт): {:02X?}", n, &ip_data[..n]);
 
     let mut ppp = vec![
         0xFF, 0x03, // Address + Control
