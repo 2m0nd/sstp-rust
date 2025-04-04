@@ -651,10 +651,10 @@ pub async fn start_tun_forwarding(
                         continue;
                     }
                 };
-                let ip_data = &buf[4..n]; // пропускаем 4 байта заголовка macOS TUN
-                let packet = wrap_ip_in_ppp_sstp(&buf);
+                let ip_data = &buf[4..buf.len()]; // пропускаем 4 байта заголовка macOS TUN
+                let packet = wrap_ip_in_ppp_sstp(&ip_data);
                 let mut writer = writer.lock().await;
-                if let Err(e) = writer.write_all(&ip_data).await {
+                if let Err(e) = writer.write_all(&packet).await {
                     eprintln!("❌ Ошибка записи в SSTP: {e}");
                 }
             }
@@ -699,11 +699,14 @@ pub async fn start_tun_forwarding(
 
                 if let Some(ip_data) = parse_ppp_ip_packet(&buf[..n]) {
                     let ip_data = ip_data.to_vec(); // выделяем для send в blocking
+                    let mut buf = Vec::with_capacity(4 + ip_data.len()); //apple header ip
+                    buf.extend_from_slice(&[0x00, 0x00, 0x00, 0x02]); // AF_INET
+                    buf.extend_from_slice(&ip_data); // сам IP-пакет
+
                     let dev = dev.clone();
                     tokio::task::spawn_blocking(move || {
                         let mut dev = dev.lock().unwrap();
-                        dev.write_all(&ip_data);
-                        println!("Send to tuna size:{} payload={:02X?}", ip_data.len(), ip_data)
+                        dev.write_all(&buf);
                     })
                     .await
                     .ok(); // можно логировать ошибку при необходимости
