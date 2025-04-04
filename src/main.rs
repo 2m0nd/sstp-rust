@@ -275,19 +275,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             PppState::SendPapAuth => {
+                log_line("Verifying login credentials");
+                log_line(&format!("Send PAP Request #{}", id_counter));
+            
                 let auth = wrap_ppp_pap_packet(id_counter, user, pwd);
                 stream.write_all(&auth).await?;
                 log_send("PAP Auth", &auth, &state);
+            
                 id_counter += 1;
                 state = PppState::WaitPapAck;
             }
 
             PppState::WaitPapAck => {
                 if let Some(ppp) = take_matching_packet(&mut pending_packets, |p| p.protocol == 0xC023 && p.code == 0x02) {
-                    println!("✅ PAP Authenticate-Ack");
+                    log_line(&format!("Received PAP Ack #{}", ppp.id));
+                    log_line("PAP authentication succeeded");
+            
                     let packet = build_sstp_call_connected_packet();
                     stream.write_all(&packet).await?;
+                    log_line("Send CALL_CONNECTED");
                     log_send("CALL_CONNECTED", &packet, &state);
+            
                     state = PppState::SendIpcpRequest;
                 } else {
                     continue;
