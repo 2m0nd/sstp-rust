@@ -2,6 +2,7 @@ use sstp_rust::sstp::build_lcp_configure_ack;
 use sstp_rust::sstp::wrap_lcp_packet;
 use sstp_rust::sstp::parse_sstp_data_packet;
 use sstp_rust::sstp::build_sstp_packet_from_ppp;
+use sstp_rust::sstp::remove_rejected_ipcp_options;
 
 #[cfg(test)]
 mod tests {
@@ -79,4 +80,35 @@ mod tests {
             panic!("❌ parse_sstp_data_packet вернул None");
         }
     }
+
+    #[test]
+    pub fn test_remove_rejected_ipcp_options() {
+        // Содержит 3 опции:
+        // - 0x83 (тип, длина 6, данные 0.0.0.0)
+        // - 0x03 (тип, длина 6, данные 0.0.0.0)
+        // - 0x81 (тип, длина 6, данные 0.0.0.0)
+        let source_payload = vec![
+            0x83, 0x06, 0x00, 0x00, 0x00, 0x00, // option 131
+            0x03, 0x06, 0x00, 0x00, 0x00, 0x00, // option 3
+            0x81, 0x06, 0x00, 0x00, 0x00, 0x00, // option 129
+        ];
+        01, 03, 00, 16, 
+        
+        83, 06, 00, 00, 00, 00, 
+        03, 06, 00, 00, 00, 00, 
+        81, 06, 00, 00, 00, 00
+
+        // Скажем, что сервер отверг опцию 131 (0x83)
+        let rejected = vec![0x83];
+
+        let expected_filtered = vec![
+            0x03, 0x06, 0x00, 0x00, 0x00, 0x00, // option 3
+            0x81, 0x06, 0x00, 0x00, 0x00, 0x00, // option 129
+        ];
+
+        let actual = remove_rejected_ipcp_options(&source_payload, &rejected);
+
+        assert_eq!(actual, expected_filtered, "Фильтрация IPCP опций работает неверно");
+    }
+
 }

@@ -850,3 +850,47 @@ pub fn build_ipcp_request_with_ip_and_dns(id: u8, ip: [u8; 4], dns: [u8; 4]) -> 
 
     sstp
 }
+
+pub fn remove_rejected_ipcp_options(payload: &[u8], rejected_types: &[u8]) -> Vec<u8> {
+    let mut filtered = Vec::new();
+    let mut i = 0;
+
+    while i + 2 <= payload.len() {
+        let typ = payload[i];
+        let len = payload[i + 1] as usize;
+
+        if len < 2 || i + len > payload.len() {
+            println!("⚠️ IPCP опция повреждена или выходит за границы: type={}, len={}", typ, len);
+            break;
+        }
+
+        if !rejected_types.contains(&typ) {
+            filtered.extend_from_slice(&payload[i..i + len]);
+        }
+
+        i += len;
+    }
+
+    filtered
+}
+
+
+pub fn extract_all_ipcp_option_types(payload: &[u8]) -> Vec<u8> {
+    let mut result = Vec::new();
+    let mut i = 0;
+
+    while i + 2 <= payload.len() {
+        let typ = payload[i];
+        let len = payload[i + 1] as usize;
+
+        if len < 2 || i + len > payload.len() {
+            println!("⚠️ IPCP option повреждена или выходит за границы: type={}, len={}", typ, len);
+            break;
+        }
+
+        result.push(typ);
+        i += len;
+    }
+
+    result
+}

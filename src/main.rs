@@ -336,6 +336,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 stream.write_all(&ipcp).await?;
                 log_send("IPCP Request", &ipcp, &state);
             
+                sent_lcp_requests.insert(id_counter, options.to_vec());
+
                 id_counter += 1;
                 state = PppState::WaitIpcpRequest;
             }
@@ -366,34 +368,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             PppState::WaitIpcpReject => {
-                if let Some(ppp) = take_matching_packet(&mut pending_packets, |p| p.protocol == 0x8021 && p.code == 0x04) {
+                if let Some(ppp) = take_matching_packet(
+                    &mut pending_packets, 
+                    |p| p.protocol == 0x8021 && p.code == 0x04
+                ) {
                     log_line(&format!("Received IPCP Configure-Reject #{}", ppp.id));
             
-                    // Показываем все отклонённые опции
-                    for (opt_type, data) in extract_all_ipcp_options(&ppp.payload) {
-                        log_recv_ipcp(ppp.id, opt_type, &data);
+                    // ✅ Лог опций из Reject-пакета
+                    for (typ, data) in extract_all_ipcp_options(&ppp.payload) {
+                        log_recv_ipcp(ppp.id, typ, &data);
                     }
             
-                    // Теперь формируем новый запрос без этих опций
-                    let rejected_types: Vec<u8> = extract_all_ipcp_options(&ppp.payload).keys().copied().collect();
-                    let new_ipcp = build_ipcp_request_filtered(id_counter, &rejected_types);
+                    // ✅ Получаем старый payload, который мы отправляли
+                    let old_payload = sent_lcp_requests.get(&ppp.id).cloned();
+                    if let Some(payload) = old_payload {
+                        // ✅ Определяем, какие опции были отвергнуты
+                        let rejected_types = extract_all_ipcp_option_types(&ppp.payload);
+                        // ✅ Удаляем отвергнутые опции
+                        let filtered_payload = remove_rejected_ipcp_options(&payload, &rejected_types);
+                        // ✅ Строим новый пакет
+                        let new_req = wrap_ipcp_packet(0x01, id_counter, &filtered_payload);
             
-                    log_line(&format!("Send IPCP Configure-Request #{}", id_counter));
+                        // ✅ Лог заголовка нового запроса
+                        log_line(&format!("Send IPCP Configure-Request #{}", id_counter));
+                        for (typ, data) in extract_all_ipcp_options(&filtered_payload) {
+                            log_send_lcp(id_counter, typ, &data);
+                        }
             
-                    let ipcp_payload = &new_ipcp[8..]; // Без SSTP и PPP заголовков
-                    for (opt_type, data) in extract_all_ipcp_options(ipcp_payload) {
-                        log_send_ipcp(id_counter, opt_type, &data);
+                        // ✅ Отправка пакета
+                        stream.write_all(&new_req).await?;
+                        log_send("IPCP Configure-Request (after Reject)", &new_req, &state);
+            
+                        // ✅ Сохраняем для последующей обработки (в NAK и ACK)
+                        sent_lcp_requests.insert(id_counter, filtered_payload);
+            
+                        // ✅ Обновляем счётчик и переходим в следующий стейт
+                        id_counter += 1;
+                        state = PppState::WaitIpcpNakWithOffer;
+                    } else {
+                        state = PppState::Error("❌ Не найден предыдущий IPCP пакет по ID".into());
                     }
-            
-                    stream.write_all(&new_ipcp).await?;
-                    log_send("IPCP Request (after Reject)", &new_ipcp, &state);
-            
-                    id_counter += 1;
-                    state = PppState::WaitIpcpNakWithOffer;
                 } else {
                     continue;
                 }
             }
+            
 
             PppState::WaitIpcpNakWithOffer => {
                 if let Some(ppp) = take_matching_packet(&mut pending_packets, |p| p.protocol == 0x8021 && p.code == 0x03) {
@@ -459,7 +478,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     
                     //смотрим че дальше летает с этого момента
                     DEBUG_PARSE.store(true, Ordering::Relaxed);
-                    
+
                     state = PppState::WAIT_WAIT;
             
                 } else {
