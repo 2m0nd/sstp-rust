@@ -530,6 +530,15 @@ pub fn build_ipcp_request_with_only_ip(ip: [u8; 4], id: u8) -> Vec<u8> {
     wrap_ipcp_packet(0x01, id, &options)
 }
 
+pub fn build_sstp_echo_response() -> Vec<u8> {
+    vec![
+        0x10, 0x01,             // SSTP v1.0, Control packet
+        0x00, 0x08,             // Length = 8
+        0x00, 0x06,             // Message Type = 0x0006 (ECHO_RESPONSE)
+        0x00, 0x00              // Attribute length = 0
+    ]
+}
+
 pub async fn read_and_parse<R: AsyncReadExt + Unpin>(
     stream: &mut R,
     buf: &mut [u8],
@@ -594,6 +603,7 @@ pub fn extract_all_ipcp_options(payload: &[u8]) -> HashMap<u8, [u8; 4]> {
 }
 
 pub fn wrap_ip_in_ppp_sstp(ip_data: &[u8]) -> Vec<u8> {
+    print!("out packet-->>");
     let mut ppp = vec![
         0xFF, 0x03, // Address + Control
         0x00, 0x21, // Protocol = IP
@@ -611,6 +621,8 @@ pub fn wrap_ip_in_ppp_sstp(ip_data: &[u8]) -> Vec<u8> {
 }
 
 pub fn parse_ppp_ip_packet(buf: &[u8]) -> Option<&[u8]> {
+    print!("<--in packet");
+
     if buf.len() < 8 {
         return None;
     }

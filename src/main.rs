@@ -13,6 +13,7 @@ use tun::{create, Configuration, platform::Device};
 use tokio::io::{AsyncRead, AsyncWrite};
 use std::sync::Arc;
 use std::sync::Mutex;
+use tokio::sync::Mutex as TokioMutex;
 use std::net::IpAddr;
 use tokio::{net::TcpStream, io::{AsyncReadExt, AsyncWriteExt}};
 use tokio_rustls::TlsConnector;
@@ -166,13 +167,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             PppState::WaitPapAck => {
                 let ppp = ppp.unwrap();
                 if ppp.protocol == 0xC023 && ppp.code == 0x02 {
-                    println!("✅ PAP Authenticate-Ack");
-                    
-                    // 💬 Вставляем CALL_CONNECTED
-                    let packet = build_sstp_call_connected_packet();
-                    stream.write_all(&packet).await?;
-                    println!("📡 Отправлен SSTP CALL_CONNECTED");
-                    
+                    println!("✅ PAP Authenticate-Ack");                    
                     state = PppState::SendIpcpRequest;
                 } else {
                     state = PppState::Error("Ожидался PAP Ack".into());
@@ -271,6 +266,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let session_info = PppSessionInfo { ip, dns1, dns2 };
             
                     println!("✅ Сессия установлена: {session_info:#?}");
+
+                    // 💬 Вставляем CALL_CONNECTED
+                    let packet = build_sstp_call_connected_packet();
+                    stream.write_all(&packet).await?;
+                    println!("📡 Отправлен SSTP CALL_CONNECTED");
+                    
                     state = PppState::Done;
                 } else {
                     state = PppState::Error("❌ Ожидался IPCP Ack".into());
@@ -292,7 +293,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
 
-    //todo: dhcp integration
+    // let mut echo_stream = stream.clone(); // до split (или передай сюда echo task до split)
+
+    // tokio::spawn(async move {
+    //     let mut buf = [0u8; 1600];
+    //     loop {
+    //         match echo_stream.read(&mut buf).await {
+    //             Ok(0) => {
+    //                 println!("🔌 Сервер закрыл соединение");
+    //                 break;
+    //             }
+    //             Ok(n) if buf[..n].starts_with(&[0x10, 0x01]) && buf[4..6] == [0x00, 0x05] => {
+    //                 println!("📶 Получен SSTP ECHO_REQUEST");
+    //                 let response = build_sstp_echo_response();
+    //                 if let Err(e) = echo_stream.write_all(&response).await {
+    //                     eprintln!("❌ Ошибка отправки ECHO_RESPONSE: {e}");
+    //                     break;
+    //                 }
+    //                 println!("✅ Отправлен ECHO_RESPONSE");
+    //             }
+    //             Ok(_) => {
+    //                 // Пропускаем другие Control Messages
+    //             }
+    //             Err(e) => {
+    //                 eprintln!("❌ Ошибка чтения SSTP control: {e}");
+    //                 break;
+    //             }
+    //         }
+    //     }
+    // });
 
     setup_and_start_tunnel(stream).await?;
 
@@ -332,10 +361,13 @@ pub async fn start_tun_forwarding(
     mut writer: WriteHalf<TlsStream<TcpStream>>,
 ) -> std::io::Result<()> {
     println!("🟢 TUN активен. Запускаем туннелирование...");
+    let writer = Arc::new(TokioMutex::new(writer));
 
     //📤 uplink: TUN → SSTP
     {
         let dev = dev.clone();
+        let writer = writer.clone();
+
         tokio::spawn(async move {
             loop {
                 let buf = match tokio::task::spawn_blocking({
@@ -361,9 +393,9 @@ pub async fn start_tun_forwarding(
                 };
 
                 let packet = wrap_ip_in_ppp_sstp(&buf);
+                let mut writer = writer.lock().await;
                 if let Err(e) = writer.write_all(&packet).await {
                     eprintln!("❌ Ошибка записи в SSTP: {e}");
-                    break;
                 }
             }
         });
@@ -372,9 +404,14 @@ pub async fn start_tun_forwarding(
     // 📥 downlink: SSTP → TUN
     {
         let dev = dev.clone();
+        let writer = writer.clone();
+
         tokio::spawn(async move {
             let mut buf = [0u8; 1600];
             loop {
+
+                println!("Читаем sstp stream");
+
                 let n = match reader.read(&mut buf).await {
                     Ok(0) => {
                         eprintln!("🔌 SSTP соединение закрыто");
@@ -386,6 +423,19 @@ pub async fn start_tun_forwarding(
                         break;
                     }
                 };
+
+                if buf[..n].starts_with(&[0x10, 0x01]) && buf[4..6] == [0x00, 0x05]
+                {
+                    println!("📶 Получен SSTP ECHO_REQUEST");
+                    let echo_resp = build_sstp_echo_response().to_vec();
+                    let mut writer = writer.lock().await;
+                    if let Err(e) = writer.write_all(&echo_resp).await {
+                        eprintln!("❌ Ошибка записи в SSTP: {e}");
+                    }
+                    println!("✅ Отправлен ECHO_RESPONSE");
+                    
+                    break;
+                }
 
                 if let Some(ip_data) = parse_ppp_ip_packet(&buf[..n]) {
                     let ip_data = ip_data.to_vec(); // выделяем для send в blocking
@@ -400,6 +450,8 @@ pub async fn start_tun_forwarding(
                 }
             }
         });
+
+        println!("Thread reading and writing started.")
     }
 
     Ok(())
