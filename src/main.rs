@@ -639,10 +639,14 @@ pub async fn start_tun_forwarding(
     println!("🟢 TUN активен. Запускаем туннелирование...");
     let writer = Arc::new(TokioMutex::new(writer));
 
+    let timeout_duration = Duration::from_millis(200);
+    let (tun_sender, mut tun_receiver) = tokio::sync::mpsc::channel::<Vec<u8>>(100);
+    let (sstp_sender, mut sstp_receiver) = tokio::sync::mpsc::channel::<Vec<u8>>(100);
+
     //📤 uplink: TUN → SSTP
     {
         let dev = dev.clone();
-        let writer = writer.clone();
+        let tun_sender = tun_sender.clone();
 
         tokio::spawn(async move {
             loop {
@@ -669,9 +673,9 @@ pub async fn start_tun_forwarding(
                 };
                 let ip_data = &buf[4..buf.len()]; // пропускаем 4 байта заголовка macOS TUN
                 let packet = wrap_ip_in_ppp_sstp(&ip_data);
-                let mut writer = writer.lock().await;
-                if let Err(e) = writer.write_all(&packet).await {
-                    eprintln!("❌ Ошибка записи в SSTP: {e}");
+                match tun_sender.send(packet).await {
+                    Ok(_) => println!("✅ Пакет успешно отправлен в SSTP очередь"),
+                    Err(e) => eprintln!("❌ Ошибка отправки: {e}"),
                 }
             }
         });
@@ -679,9 +683,7 @@ pub async fn start_tun_forwarding(
 
     // 📥 downlink: SSTP → TUN
     {
-        let dev = dev.clone();
-        let writer = writer.clone();
-
+        let tun_sender = tun_sender.clone();
         tokio::spawn(async move {
             let mut buf = [0u8; 1600];
             loop {
@@ -705,11 +707,11 @@ pub async fn start_tun_forwarding(
                 {
                     println!("📶 Получен SSTP ECHO_REQUEST");
                     let echo_resp = build_sstp_echo_response().to_vec();
-                    let mut writer = writer.lock().await;
-                    if let Err(e) = writer.write_all(&echo_resp).await {
-                        eprintln!("❌ Ошибка записи в SSTP: {e}");
+                    match tun_sender.send(echo_resp).await {
+                        Ok(_) => println!("✅ Пакет успешно отправлен в SSTP очередь"),
+                        Err(e) => eprintln!("❌ Ошибка отправки: {e}"),
                     }
-                    println!("✅ Отправлен ECHO_RESPONSE");
+                    println!("✅ Записан в очередь SSTP ECHO_RESPONSE");
                     continue;
                 }
 
@@ -719,17 +721,44 @@ pub async fn start_tun_forwarding(
                     buf.extend_from_slice(&[0x00, 0x00, 0x00, 0x02]); // AF_INET
                     buf.extend_from_slice(&ip_data); // сам IP-пакет
 
-                    let dev = dev.clone();
-                    tokio::task::spawn_blocking(move || {
-                        let mut dev = dev.lock().unwrap();
-                        dev.write_all(&buf);
-                    })
-                    .await
-                    .ok(); // можно логировать ошибку при необходимости
+                    match sstp_sender.send(buf).await {
+                        Ok(_) => println!("✅ Пакет успешно отправлен в TUN очередь"),
+                        Err(e) => eprintln!("❌ Ошибка записи в TUN очередь: {e}"),
+                    }
                 }
             }
         });
+        
+        // ✉️ Поток записи в SSTP из tun_sender
+        {
+            let mut tun_receiver = tun_receiver;
+            let writer = writer.clone();
+            tokio::spawn(async move {
+                while let Some(packet) = tun_receiver.recv().await {
+                    let mut writer = writer.lock().await;
+                    if let Err(e) = writer.write_all(&packet).await {
+                        eprintln!("❌ Ошибка записи в SSTP: {e}");
+                    }
+                }
+            });
+        }
 
+        // ✉️ Поток записи в TUN из sstp_sender
+        {
+            let dev = dev.clone();
+            tokio::spawn(async move {
+                while let Some(packet) = sstp_receiver.recv().await {
+                    let dev = dev.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        let mut dev = dev.lock().unwrap();
+                        if let Err(e) = dev.write_all(&packet) {
+                            eprintln!("❌ Ошибка записи в TUN: {e}");
+                        }
+                    })
+                    .await;
+                }
+            });
+        }
         println!("Thread reading and writing started.")
     }
 
