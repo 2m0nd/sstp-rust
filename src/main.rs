@@ -26,6 +26,7 @@ use tokio::sync::Mutex as TokioMutex;
 use std::net::IpAddr;
 use tokio::{net::TcpStream, io::{AsyncReadExt, AsyncWriteExt}};
 use tokio_rustls::TlsConnector;
+use std::time::{ Instant};
 use tokio_rustls::rustls::{
     Certificate, ClientConfig, Error as TLSError, ServerName,
     client::ServerCertVerifier,
@@ -674,7 +675,7 @@ pub async fn start_tun_forwarding(
                 let ip_data = &buf[4..buf.len()]; // пропускаем 4 байта заголовка macOS TUN
                 let packet = wrap_ip_in_ppp_sstp(&ip_data);
                 match tun_sender.send(packet).await {
-                    Ok(_) => println!("✅ Пакет успешно отправлен в SSTP очередь"),
+                    Ok(_) => (), //println!("✅ Пакет успешно отправлен в SSTP очередь")
                     Err(e) => eprintln!("❌ Ошибка отправки: {e}"),
                 }
             }
@@ -708,7 +709,7 @@ pub async fn start_tun_forwarding(
                     println!("📶 Получен SSTP ECHO_REQUEST");
                     let echo_resp = build_sstp_echo_response().to_vec();
                     match tun_sender.send(echo_resp).await {
-                        Ok(_) => println!("✅ Пакет успешно отправлен в SSTP очередь"),
+                        Ok(_) => (),//println!("✅ Пакет успешно отправлен в SSTP очередь")
                         Err(e) => eprintln!("❌ Ошибка отправки: {e}"),
                     }
                     println!("✅ Записан в очередь SSTP ECHO_RESPONSE");
@@ -722,7 +723,7 @@ pub async fn start_tun_forwarding(
                     buf.extend_from_slice(&ip_data); // сам IP-пакет
 
                     match sstp_sender.send(buf).await {
-                        Ok(_) => println!("✅ Пакет успешно отправлен в TUN очередь"),
+                        Ok(_) => (), //println!("✅ Пакет успешно отправлен в TUN очередь")
                         Err(e) => eprintln!("❌ Ошибка записи в TUN очередь: {e}"),
                     }
                 }
