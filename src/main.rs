@@ -1,10 +1,13 @@
 mod sstp;
 mod log;
+mod route;
 use log::*;
+use route::*;
 use sstp_rust::DEBUG_PARSE;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::io;
+use tokio::time::{sleep, Duration};
 use std::io::Read;
 use std::io::Write;
 use std::net::Ipv4Addr;
@@ -71,6 +74,7 @@ fn log_send(label: &str, packet: &[u8], state: &PppState) {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+
     let user = "AHC\\test_user_client";
     let pwd = "EXAPLME_PWD";
     let server_ip = "SSTP_SERVER_IP_ADDRESS";
@@ -581,7 +585,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         
         //tunel start
          setup_and_start_tunnel(stream, Ipv4Addr::from(info.ip)).await?;
-         println!("🟢 TUN активен, туннелирование запущено. Ждём трафик...");    
+
+        println!("🟢 TUN активен, туннелирование запущено. Ждём трафик...");  
+
+        // sleep(Duration::from_secs(3)).await;
+
+        // println!("🟢 Add route default..."); 
+        // //todo set route
+        // match set_default_route_utun9() {
+        //     Ok(_) => println!("✅ Default route added via utun9!"),
+        //     Err(e) => eprintln!("❌ Error: {}", e),
+        // }
+          
          tokio::signal::ctrl_c().await.expect("Failed to listen for ctrl-c");    
     } else {
         eprintln!("❌ Стейт-машина не вернула сессию");
@@ -599,6 +614,7 @@ pub async fn setup_and_start_tunnel(stream: TlsStream<TcpStream>, ip: Ipv4Addr) 
           .netmask((255, 255, 255, 0))
           .mtu(1400)
           .up();
+
 
     let dev = create(&config).map_err(|e| {
         std::io::Error::new(std::io::ErrorKind::Other, format!("tun create failed: {e}"))
