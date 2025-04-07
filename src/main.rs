@@ -637,8 +637,10 @@ pub async fn start_tun_forwarding(
     let writer = Arc::new(TokioMutex::new(writer));
 
     let timeout_duration = Duration::from_millis(200);
-    let (tun_sender, mut tun_receiver) = tokio::sync::mpsc::channel::<Vec<u8>>(1000);
-    let (sstp_sender, mut sstp_receiver) = tokio::sync::mpsc::channel::<Vec<u8>>(1000);
+    let (tun_sender, mut tun_receiver) = 
+        tokio::sync::mpsc::channel::<Vec<u8>>(1000 * 20);
+    let (sstp_sender, mut sstp_receiver) = 
+        tokio::sync::mpsc::channel::<Vec<u8>>(1000 * 20);
     let tun_reader = tun.clone();
     let tun_writer = tun.clone();
 
@@ -668,8 +670,8 @@ pub async fn start_tun_forwarding(
     
         // Поток для чтения данных из канала
         tokio::spawn(async move {
+            let mut writer = writer.lock().await;
             while let Some(packet) = tun_receiver.recv().await {
-                let mut writer = writer.lock().await;
                 if let Err(e) = writer.write_all(&packet).await {
                     eprintln!("❌ Ошибка записи в SSTP: {e}");
                 }
@@ -713,10 +715,16 @@ pub async fn start_tun_forwarding(
                 }
 
                 if let Some(ip_data) = parse_ppp_ip_packet(&buf[..n]) {
+
+                    //let start = Instant::now();
+
                     let ip_data = ip_data.to_vec(); // выделяем для send в blocking
                     let mut buf = Vec::with_capacity(4 + ip_data.len()); //apple header ip
                     buf.extend_from_slice(&[0x00, 0x00, 0x00, 0x02]); // AF_INET
                     buf.extend_from_slice(&ip_data); // сам IP-пакет
+
+                    let duration = start.elapsed(); // Получаем время выполнения
+                    //println!("Время выполнения: {:?} (секунды)", duration);
 
                     match sstp_sender.send(buf).await {
                         Ok(_) => (), //println!("✅ Пакет успешно отправлен в TUN очередь")
