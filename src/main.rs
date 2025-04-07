@@ -5,6 +5,7 @@ mod async_tun;
 use async_tun::add_default_before;
 use async_tun::AsyncTun;
 use log::*;
+use tokio::select;
 use route::*;
 use sstp_rust::DEBUG_PARSE;
 use std::collections::HashMap;
@@ -591,7 +592,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         
         // Создаем CancellationToken
         let cancellation_token = CancellationToken::new();
-
         // Слушаем сигнал Ctrl+C, чтобы отменить задачи
         let cancellation_token_clone = cancellation_token.clone();
         tokio::spawn(async move {
@@ -605,18 +605,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         println!("🟢 TUN активен, туннелирование запущено. Ждём трафик...");  
 
-        // sleep(Duration::from_secs(3)).await;
+        tokio::signal::ctrl_c().await.expect("Failed to listen for ctrl-c");    
 
-        // println!("🟢 Add route default..."); 
-        // //todo set route
-        // match set_default_route_utun9() {
-        //     Ok(_) => println!("✅ Default route added via utun9!"),
-        //     Err(e) => eprintln!("❌ Error: {}", e),
-        // }
-          
-         tokio::signal::ctrl_c().await.expect("Failed to listen for ctrl-c");    
+        let _ = add_default_before();
 
-         let _ = add_default_before();
     } else {
         eprintln!("❌ Стейт-машина не вернула сессию");
     }
@@ -671,39 +663,64 @@ pub async fn start_tun_forwarding(
     //📤 uplink: TUN → SSTP
     {
         let tun_sender = tun_sender.clone();
-        tokio::spawn(async move {
-            loop {
-                if cancellation_token.is_cancelled() {
-                    eprintln!("❌ Задача чтения TUN отменена.");
-                    break;
-                }
-
-                let buf = match tun_reader.read().await {
-                    Ok(data) => data,
-                    Err(e) => {
-                        eprintln!("❌ Ошибка чтения из TUN: {e}");
-                        continue;
+        tokio::spawn({
+            let cancellation_token = cancellation_token.clone();
+            async move {
+                loop {
+                    // Проверка отмены
+                    if cancellation_token.is_cancelled() {
+                        tun_sender.closed().await;
+                        println!("❌ Поток чтения из TUN отменен.");
+                        break;
+                    }//else{println!("поток 1 работает...")}
+    
+                    let result = timeout(timeout_duration, tun_reader.read()).await;
+                    match result {
+                        Ok(Ok(buf)) => {
+                            let ip_data = &buf[4..buf.len()]; // пропускаем 4 байта заголовка macOS TUN
+                            let packet = wrap_ip_in_ppp_sstp(&ip_data);
+                            match tun_sender.send(packet).await {
+                                Ok(_) => (),
+                                Err(e) => eprintln!("❌ Ошибка отправки в канал: {e}"),
+                            }
+                        }
+                        Ok(Err(e)) => {
+                            eprintln!("❌ Ошибка чтения из TUN: {e}");
+                        }
+                        Err(_) => {
+                            eprintln!("❌ Тайм-аут при чтении из TUN.");
+                        }
                     }
-                };                
-                let ip_data = &buf[4..buf.len()]; // пропускаем 4 байта заголовка macOS TUN
-                //println!("RECEIVE from tun\t: ({} байт): {:02X?}", ip_data.len(), &ip_data[..ip_data.len()]);
-                let packet = wrap_ip_in_ppp_sstp(&ip_data);
-                match tun_sender.send(packet).await {
-                    Ok(_) => (),//println!("📤 Отправлено в канал SSTP")
-                    Err(e) => eprintln!("❌ Ошибка отправки в канал: {e}"),
+                    tokio::time::sleep(delay).await;
                 }
-                tokio::time::sleep(delay).await;
             }
         });
     
         // Поток для чтения данных из канала
-        tokio::spawn(async move {
-            let mut writer = writer.lock().await;            
-            while let Some(packet) = tun_receiver.recv().await {
-                if let Err(e) = writer.write_all(&packet).await {
-                    eprintln!("❌ Ошибка записи в SSTP: {e}");
+        tokio::spawn({
+            let cancellation_token = cancellation_token.clone(); 
+            async move {
+                let mut writer = writer.lock().await;
+                loop {
+                    select! {
+                        _ = cancellation_token.cancelled() => {
+                            println!("❌ Поток запис в SSTP отменен.");
+                            break;
+                        }
+                        Some(packet) = tun_receiver.recv() => {
+                            //println!("поток 2 работает...");
+                            if let Err(e) = writer.write_all(&packet).await {
+                                eprintln!("❌ Ошибка записи в SSTP: {e}");
+                            }
+                            tokio::time::sleep(delay).await;
+                        }
+                        else => {
+                            // Если канал закрыт, завершить работу
+                            println!("Канал закрыт.");
+                            break;
+                        }
+                    }                    
                 }
-                tokio::time::sleep(delay).await;
             }
         });
     }
@@ -711,67 +728,86 @@ pub async fn start_tun_forwarding(
     // 📥 downlink: SSTP → TUN
     {
         let tun_sender = tun_sender.clone();
-        tokio::spawn(async move {
+        tokio::spawn({
+            let cancellation_token = cancellation_token.clone(); 
+            async move {
             
-            let mut buf = [0u8; 1600];
-            loop {
-
-                //println!("Читаем sstp stream");
-
-                let n = match reader.read(&mut buf).await {
-                    Ok(0) => {
-                        eprintln!("🔌 SSTP соединение закрыто");
+                let mut buf = [0u8; 1600];
+                loop {
+                    // Проверка отмены
+                    if cancellation_token.is_cancelled() {
+                        sstp_sender.closed().await;
+                        println!("❌ Поток чтения SSTP оставнолен.");
                         break;
+                    }//else{println!("поток 3 работает...")}
+                    //println!("Читаем sstp stream");
+    
+                    let result = timeout(timeout_duration, reader.read(&mut buf)).await;
+                    match result {
+                        Ok(Ok(0)) => {
+                            eprintln!("🔌 SSTP соединение закрыто");
+                            break;
+                        }
+                        Ok(Ok(n)) => {
+                            // Здесь идет обработка данных
+                            if buf[..n].starts_with(&[0x10, 0x01]) && buf[4..6] == [0x00, 0x05] {
+                                println!("📶 Получен SSTP ECHO_REQUEST");
+                                let echo_resp = build_sstp_echo_response().to_vec();
+                                match tun_sender.send(echo_resp).await {
+                                    Ok(_) => (),
+                                    Err(e) => eprintln!("❌ Ошибка отправки: {e}"),
+                                }
+                                println!("✅ Записан в очередь SSTP ECHO_RESPONSE");
+                            }
+    
+                            if let Some(ip_data) = parse_ppp_ip_packet(&buf[..n]) {
+                                let ip_data = ip_data.to_vec(); // выделяем для send в blocking
+                                let mut buf = Vec::with_capacity(4 + ip_data.len()); //apple header ip
+                                buf.extend_from_slice(&[0x00, 0x00, 0x00, 0x02]); // AF_INET
+                                buf.extend_from_slice(&ip_data); // сам IP-пакет
+    
+                                match sstp_sender.send(buf).await {
+                                    Ok(_) => (),
+                                    Err(e) => eprintln!("❌ Ошибка записи в TUN очередь: {e}"),
+                                }
+                            }
+                        }
+                        Ok(Err(e)) => {
+                            eprintln!("❌ Ошибка чтения из SSTP: {e}");
+                        }
+                        Err(_) => {
+                            eprintln!("❌ Тайм-аут при чтении из SSTP.");
+                        }
                     }
-                    Ok(n) => n,
-                    Err(e) => {
-                        eprintln!("❌ Ошибка чтения из SSTP: {e}");
-                        break;
-                    }
-                };
-                //println!("RECEIVE from sstp\t: ({} байт): {:02X?}", n, &buf[..n]);
-
-                if buf[..n].starts_with(&[0x10, 0x01]) && buf[4..6] == [0x00, 0x05]
-                {
-                    println!("📶 Получен SSTP ECHO_REQUEST");
-                    let echo_resp = build_sstp_echo_response().to_vec();
-                    match tun_sender.send(echo_resp).await {
-                        Ok(_) => (),//println!("✅ Пакет успешно отправлен в SSTP очередь")
-                        Err(e) => eprintln!("❌ Ошибка отправки: {e}"),
-                    }
-                    println!("✅ Записан в очередь SSTP ECHO_RESPONSE");
-                    continue;
+                    tokio::time::sleep(delay).await;
                 }
-
-                if let Some(ip_data) = parse_ppp_ip_packet(&buf[..n]) {
-
-                    //let start = Instant::now();
-
-                    let ip_data = ip_data.to_vec(); // выделяем для send в blocking
-                    let mut buf = Vec::with_capacity(4 + ip_data.len()); //apple header ip
-                    buf.extend_from_slice(&[0x00, 0x00, 0x00, 0x02]); // AF_INET
-                    buf.extend_from_slice(&ip_data); // сам IP-пакет
-
-                    //let duration = start.elapsed(); // Получаем время выполнения
-                    //println!("Время выполнения: {:?} (секунды)", duration);
-
-                    match sstp_sender.send(buf).await {
-                        Ok(_) => (), //println!("✅ Пакет успешно отправлен в TUN очередь")
-                        Err(e) => eprintln!("❌ Ошибка записи в TUN очередь: {e}"),
-                    }
-                }
-                tokio::time::sleep(delay).await;
             }
         });
 
         // ✉️ Поток записи в TUN из sstp_sender
         {
-            tokio::spawn(async move {
-                while let Some(packet) = sstp_receiver.recv().await {
-                    if let Err(e) = tun_writer.write(&packet).await {
-                        eprintln!("❌ Ошибка записи в TUN: {e}");
+            tokio::spawn({
+                let cancellation_token = cancellation_token.clone(); 
+                async move {
+                    loop{
+                        select! {
+                            _ = cancellation_token.cancelled() => {
+                                println!("❌ Поток записи в TUN оставнолен.");
+                                break;
+                            }
+                            Some(packet) = sstp_receiver.recv() => {
+                                if let Err(e) = tun_writer.write(&packet).await {
+                                    eprintln!("❌ Ошибка записи в TUN: {e}");
+                                }
+                                tokio::time::sleep(delay).await;
+                            }
+                            else => {
+                                // Если канал закрыт, завершить работу
+                                println!("Канал закрыт.");
+                                break;
+                            }
+                        }   
                     }
-                    tokio::time::sleep(delay).await;
                 }
             });
         }

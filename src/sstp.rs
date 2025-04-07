@@ -28,9 +28,9 @@ pub async fn read_and_parse_all<R: AsyncRead + Unpin>(
     // 🧪 Обрабатываем то, что осталось
     if !leftover.is_empty() {
         let packets = extract_ppp_from_sstp_stream(leftover);
-        if packets.is_empty() {
-            println!("📭 Нет распарсенных PPP пакетов (в leftover)");
-        }
+        // if packets.is_empty() {
+        //     println!("📭 Нет распарсенных PPP пакетов (в leftover)");
+        // }
         queue.extend(packets);
     }
 
@@ -49,9 +49,9 @@ pub async fn read_and_parse_all<R: AsyncRead + Unpin>(
         leftover.extend_from_slice(&buf[..n]);
 
         let packets = extract_ppp_from_sstp_stream(leftover);
-        if packets.is_empty() {
-            println!("📭 Нет распарсенных PPP пакетов (из read)");
-        }
+        // if packets.is_empty() {
+        //     println!("📭 Нет распарсенных PPP пакетов (из read)");
+        // }
         queue.extend(packets);
     }
 
