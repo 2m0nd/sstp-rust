@@ -694,7 +694,7 @@ pub async fn start_tun_forwarding(
                             eprintln!("❌ Тайм-аут при чтении из TUN.");
                         }
                     }
-                    tokio::time::sleep(delay).await;
+                    tokio::task::yield_now().await;
                 }
             }
         });
@@ -717,7 +717,7 @@ pub async fn start_tun_forwarding(
                             if let Err(e) = writer.write_all(&packet).await {
                                 eprintln!("❌ Ошибка записи в SSTP: {e}");
                             }
-                            tokio::time::sleep(delay).await;
+                            tokio::task::yield_now().await;
                         }
                         else => {
                             // Если канал закрыт, завершить работу
@@ -784,7 +784,7 @@ pub async fn start_tun_forwarding(
                             eprintln!("❌ Тайм-аут при чтении из SSTP.");
                         }
                     }
-                    tokio::time::sleep(delay).await;
+                    tokio::task::yield_now().await;
                 }
             }
         });
@@ -804,7 +804,7 @@ pub async fn start_tun_forwarding(
                                 if let Err(e) = tun_writer.write(&packet).await {
                                     eprintln!("❌ Ошибка записи в TUN: {e}");
                                 }
-                                tokio::time::sleep(delay).await;
+                                tokio::task::yield_now().await;
                             }
                             else => {
                                 // Если канал закрыт, завершить работу
