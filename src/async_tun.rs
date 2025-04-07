@@ -210,3 +210,42 @@ impl AsyncTun {
     }
 
 }
+
+
+pub fn add_default_before() -> Result<(), Box<dyn std::error::Error>>   {
+
+    let status = Command::new("route")
+    .args([
+       "-n",
+        "delete",
+        "-net",
+        "default"
+    ])
+    .status()?;
+   if !status.success() {
+       return Err("error remove default route".into());
+   }
+
+    // добавить дефолтный роут через wifi
+    //sudo route -n add -net default -interface en0
+    let status = Command::new("ifconfig")
+    .args([
+        "en0",
+        "down"
+    ])
+    .status()?;
+   if !status.success() {
+       return Err("add route failed to configure utun".into());
+   }
+
+   let status = Command::new("ifconfig")
+   .args([
+       "en0",
+       "up"
+   ])
+   .status()?;
+  if !status.success() {
+      return Err("add route failed to configure utun".into());
+  }
+   Ok(())
+}

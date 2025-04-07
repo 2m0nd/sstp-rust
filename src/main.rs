@@ -2,6 +2,7 @@ mod sstp;
 mod log;
 mod route;
 mod async_tun;
+use async_tun::add_default_before;
 use async_tun::AsyncTun;
 use log::*;
 use route::*;
@@ -602,6 +603,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // }
           
          tokio::signal::ctrl_c().await.expect("Failed to listen for ctrl-c");    
+
+         let _ = add_default_before();
     } else {
         eprintln!("❌ Стейт-машина не вернула сессию");
     }
