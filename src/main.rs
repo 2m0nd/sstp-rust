@@ -637,11 +637,12 @@ pub async fn start_tun_forwarding(
     let writer = Arc::new(TokioMutex::new(writer));
 
     let timeout_duration = Duration::from_millis(200);
-    let (tun_sender, mut tun_receiver) = tokio::sync::mpsc::channel::<Vec<u8>>(100);
-    let (sstp_sender, mut sstp_receiver) = tokio::sync::mpsc::channel::<Vec<u8>>(100);
+    let (tun_sender, mut tun_receiver) = tokio::sync::mpsc::channel::<Vec<u8>>(1000);
+    let (sstp_sender, mut sstp_receiver) = tokio::sync::mpsc::channel::<Vec<u8>>(1000);
     let tun_reader = tun.clone();
     let tun_writer = tun.clone();
 
+    let delay = Duration::from_micros(10);
     //📤 uplink: TUN → SSTP
     {
         let tun_sender = tun_sender.clone();
@@ -661,7 +662,7 @@ pub async fn start_tun_forwarding(
                     Ok(_) => (),//println!("📤 Отправлено в канал SSTP")
                     Err(e) => eprintln!("❌ Ошибка отправки в канал: {e}"),
                 }
-                tokio::time::sleep(Duration::from_millis(5)).await;
+                tokio::time::sleep(delay).await;
             }
         });
     
@@ -672,7 +673,7 @@ pub async fn start_tun_forwarding(
                 if let Err(e) = writer.write_all(&packet).await {
                     eprintln!("❌ Ошибка записи в SSTP: {e}");
                 }
-                tokio::time::sleep(Duration::from_millis(5)).await;
+                tokio::time::sleep(delay).await;
             }
         });
     }
@@ -722,7 +723,7 @@ pub async fn start_tun_forwarding(
                         Err(e) => eprintln!("❌ Ошибка записи в TUN очередь: {e}"),
                     }
                 }
-                tokio::time::sleep(Duration::from_millis(5)).await;
+                tokio::time::sleep(delay).await;
             }
         });
 
@@ -733,7 +734,7 @@ pub async fn start_tun_forwarding(
                     if let Err(e) = tun_writer.write(&packet).await {
                         eprintln!("❌ Ошибка записи в TUN: {e}");
                     }
-                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    tokio::time::sleep(delay).await;
                 }
             });
         }
