@@ -1,6 +1,8 @@
 mod sstp;
 mod log;
 mod route;
+mod async_tun;
+use async_tun::AsyncTun;
 use log::*;
 use route::*;
 use sstp_rust::DEBUG_PARSE;
@@ -609,20 +611,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// Финальный шаг после PPP FSM: создаём TUN и запускаем туннелирование
 pub async fn setup_and_start_tunnel(stream: TlsStream<TcpStream>, ip: Ipv4Addr) -> std::io::Result<()> {
     // ✅ Создаём TUN интерфейс
-    let mut config = Configuration::default();
-    config.address(ip)
-          .destination(ip)
-          .netmask((255, 255, 255, 0))
-          .mtu(1400)
-          .up();
 
-
-    let dev = create(&config).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::Other, format!("tun create failed: {e}"))
-    })?;
-
-    // ✅ Оборачиваем в Arc<Mutex<>>
-    let dev =  Arc::new(Mutex::new(dev));
+    let dev = AsyncTun::new(
+        ip,
+        ip,
+        Ipv4Addr::new(255, 255, 255, 0),
+        ).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
     // ✅ Разделяем SSTP поток
     let (reader, writer) = split(stream);
@@ -633,7 +627,7 @@ pub async fn setup_and_start_tunnel(stream: TlsStream<TcpStream>, ip: Ipv4Addr) 
 
 /// Стартует IP-туннель: обменивается трафиком между SSTP и TUN
 pub async fn start_tun_forwarding(
-    dev: Arc<Mutex<Device>>,
+    mut tun: AsyncTun,
     mut reader: ReadHalf<TlsStream<TcpStream>>,
     mut writer: WriteHalf<TlsStream<TcpStream>>,
 ) -> std::io::Result<()> {
@@ -643,32 +637,20 @@ pub async fn start_tun_forwarding(
     let timeout_duration = Duration::from_millis(200);
     let (tun_sender, mut tun_receiver) = tokio::sync::mpsc::channel::<Vec<u8>>(100);
     let (sstp_sender, mut sstp_receiver) = tokio::sync::mpsc::channel::<Vec<u8>>(100);
+    let tun_reader = tun.clone();
+    let tun_writer = tun.clone();
 
     //📤 uplink: TUN → SSTP
     {
-        let dev = dev.clone();
+        //let dev = dev.clone();
         let tun_sender = tun_sender.clone();
 
         tokio::spawn(async move {
             loop {
-                let buf = match tokio::task::spawn_blocking({
-                    let dev = dev.clone();
-                    move || {
-                        let mut buf = [0u8; 1600];
-                        let n = {
-                            let mut locked = dev.lock().unwrap();
-                            locked.read(&mut buf)
-                        }?;
-                        Ok::<_, std::io::Error>(buf[..n].to_vec())
-                    }
-                }).await {
-                    Ok(Ok(data)) => data, // ✅ теперь buf будет Vec<u8>
-                    Ok(Err(e)) => {
-                        eprintln!("❌ Ошибка чтения из TUN: {e}");
-                        continue; // 🔁 не break, чтобы buf не стал `()`
-                    }
+                let buf = match tun_reader.read().await {
+                    Ok(data) => data,
                     Err(e) => {
-                        eprintln!("❌ spawn_blocking panic: {e}");
+                        eprintln!("❌ Ошибка чтения из TUN: {e}");
                         continue;
                     }
                 };
@@ -746,17 +728,11 @@ pub async fn start_tun_forwarding(
 
         // ✉️ Поток записи в TUN из sstp_sender
         {
-            let dev = dev.clone();
             tokio::spawn(async move {
                 while let Some(packet) = sstp_receiver.recv().await {
-                    let dev = dev.clone();
-                    let _ = tokio::task::spawn_blocking(move || {
-                        let mut dev = dev.lock().unwrap();
-                        if let Err(e) = dev.write_all(&packet) {
-                            eprintln!("❌ Ошибка записи в TUN: {e}");
-                        }
-                    })
-                    .await;
+                    if let Err(e) = tun_writer.write(&packet).await {
+                        eprintln!("❌ Ошибка записи в TUN: {e}");
+                    }
                 }
             });
         }
