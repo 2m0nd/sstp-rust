@@ -610,13 +610,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Финальный шаг после PPP FSM: создаём TUN и запускаем туннелирование
 pub async fn setup_and_start_tunnel(stream: TlsStream<TcpStream>, ip: Ipv4Addr) -> std::io::Result<()> {
-    // ✅ Создаём TUN интерфейс
 
+    
     let dev = AsyncTun::new(
         ip,
         ip,
         Ipv4Addr::new(255, 255, 255, 0),
-        ).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    ).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;;
+
+    println!("запустили TUN:{}", dev.name());
 
     // ✅ Разделяем SSTP поток
     let (reader, writer) = split(stream);
