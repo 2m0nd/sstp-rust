@@ -13,5 +13,6 @@ anyhow = "1.0"
 pnet_packet = "0.34.0"
 uuid = { version = "1", features = ["v4"] }
 tokio = { version = "1", features = ["full"] }
+tokio-util = "0.6"
 tokio-rustls = "0.24"
 rustls = { version = "0.21", features = ["dangerous_configuration"] }  # ← важно!

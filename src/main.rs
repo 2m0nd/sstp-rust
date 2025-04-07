@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::io;
 use std::str::FromStr;
-use tokio::time::{sleep, Duration};
+use tokio::time::{sleep, Duration, timeout};
 use std::io::Read;
 use std::io::Write;
 use std::net::Ipv4Addr;
@@ -42,6 +42,7 @@ use tokio_rustls::client::TlsStream;
 mod dhcp;
 use dhcp::*;
 use std::sync::atomic::{AtomicBool, Ordering};
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug)]
 pub struct PppSessionInfo {
@@ -588,8 +589,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(info) = &session_info {
         println!("🌐 IP = {:?}, DNS = {:?}", info.ip, info.dns1);
         
+        // Создаем CancellationToken
+        let cancellation_token = CancellationToken::new();
+
+        // Слушаем сигнал Ctrl+C, чтобы отменить задачи
+        let cancellation_token_clone = cancellation_token.clone();
+        tokio::spawn(async move {
+            tokio::signal::ctrl_c().await.expect("Failed to listen for ctrl-c");
+            println!("❌ Получен сигнал отмены (Ctrl+C). Останавливаем туннелирование...");
+            cancellation_token_clone.cancel(); // Отменяем все задачи
+        });
+        
         //tunel start
-        setup_and_start_tunnel(stream, server_ip, Ipv4Addr::from(info.ip)).await;
+        setup_and_start_tunnel(stream, server_ip, Ipv4Addr::from(info.ip), cancellation_token).await;
 
         println!("🟢 TUN активен, туннелирование запущено. Ждём трафик...");  
 
@@ -613,7 +625,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Финальный шаг после PPP FSM: создаём TUN и запускаем туннелирование
-pub async fn setup_and_start_tunnel(stream: TlsStream<TcpStream>, server_ip: &str, ip: Ipv4Addr) -> std::io::Result<()> {
+pub async fn setup_and_start_tunnel(
+    stream: TlsStream<TcpStream>, 
+    server_ip: &str, ip: Ipv4Addr,
+    cancellation_token: CancellationToken,) -> std::io::Result<()> {
 
     let vpn_server_ip = Ipv4Addr::from_str(&server_ip)
     .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;;
@@ -631,7 +646,7 @@ pub async fn setup_and_start_tunnel(stream: TlsStream<TcpStream>, server_ip: &st
     let (reader, writer) = split(stream);
 
     // ✅ Запускаем туннелирование
-    start_tun_forwarding(dev, reader, writer).await
+    start_tun_forwarding(dev, reader, writer, cancellation_token).await
 }
 
 /// Стартует IP-туннель: обменивается трафиком между SSTP и TUN
@@ -639,6 +654,7 @@ pub async fn start_tun_forwarding(
     mut tun: AsyncTun,
     mut reader: ReadHalf<TlsStream<TcpStream>>,
     mut writer: WriteHalf<TlsStream<TcpStream>>,
+    cancellation_token: CancellationToken,
 ) -> std::io::Result<()> {
     println!("🟢 TUN активен. Запускаем туннелирование...");
     let writer = Arc::new(TokioMutex::new(writer));
@@ -657,6 +673,11 @@ pub async fn start_tun_forwarding(
         let tun_sender = tun_sender.clone();
         tokio::spawn(async move {
             loop {
+                if cancellation_token.is_cancelled() {
+                    eprintln!("❌ Задача чтения TUN отменена.");
+                    break;
+                }
+
                 let buf = match tun_reader.read().await {
                     Ok(data) => data,
                     Err(e) => {
@@ -677,7 +698,7 @@ pub async fn start_tun_forwarding(
     
         // Поток для чтения данных из канала
         tokio::spawn(async move {
-            let mut writer = writer.lock().await;
+            let mut writer = writer.lock().await;            
             while let Some(packet) = tun_receiver.recv().await {
                 if let Err(e) = writer.write_all(&packet).await {
                     eprintln!("❌ Ошибка записи в SSTP: {e}");
@@ -691,6 +712,7 @@ pub async fn start_tun_forwarding(
     {
         let tun_sender = tun_sender.clone();
         tokio::spawn(async move {
+            
             let mut buf = [0u8; 1600];
             loop {
 
