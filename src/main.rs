@@ -798,7 +798,7 @@ pub async fn start_tun_forwarding(
                 let cancellation_token = cancellation_token.clone(); 
                 async move {
                     let mut total_bytes = 0;
-                    let period = 5;
+                    let period = 1;
                     let mut start = Instant::now();
                     loop{
                         select! {
