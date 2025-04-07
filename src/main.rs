@@ -670,7 +670,7 @@ pub async fn start_tun_forwarding(
                     // Проверка отмены
                     if cancellation_token.is_cancelled() {
                         tun_sender.closed().await;
-                        println!("❌ Поток чтения из TUN отменен.");
+                        println!("❌ Поток чтения из TUN остановлен (1).");
                         break;
                     }//else{println!("поток 1 работает...")}
     
@@ -704,7 +704,7 @@ pub async fn start_tun_forwarding(
                 loop {
                     select! {
                         _ = cancellation_token.cancelled() => {
-                            println!("❌ Поток запис в SSTP отменен.");
+                            println!("❌ Поток записи в SSTP отставнолен (2).");
                             break;
                         }
                         Some(packet) = tun_receiver.recv() => {
@@ -737,7 +737,7 @@ pub async fn start_tun_forwarding(
                     // Проверка отмены
                     if cancellation_token.is_cancelled() {
                         sstp_sender.closed().await;
-                        println!("❌ Поток чтения SSTP оставнолен.");
+                        println!("❌ Поток чтения SSTP оставнолен (3).");
                         break;
                     }//else{println!("поток 3 работает...")}
                     //println!("Читаем sstp stream");
@@ -792,7 +792,7 @@ pub async fn start_tun_forwarding(
                     loop{
                         select! {
                             _ = cancellation_token.cancelled() => {
-                                println!("❌ Поток записи в TUN оставнолен.");
+                                println!("❌ Поток записи в TUN оставнолен (4).");
                                 break;
                             }
                             Some(packet) = sstp_receiver.recv() => {
