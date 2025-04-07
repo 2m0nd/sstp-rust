@@ -609,6 +609,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let _ = add_default_before();
 
+        std::process::exit(0);
+
     } else {
         eprintln!("❌ Стейт-машина не вернула сессию");
     }
@@ -653,9 +655,9 @@ pub async fn start_tun_forwarding(
 
     let timeout_duration = Duration::from_millis(200);
     let (tun_sender, mut tun_receiver) = 
-        tokio::sync::mpsc::channel::<Vec<u8>>(1000 * 20);
+        tokio::sync::mpsc::channel::<Vec<u8>>(1000 * 30);
     let (sstp_sender, mut sstp_receiver) = 
-        tokio::sync::mpsc::channel::<Vec<u8>>(1000 * 20);
+        tokio::sync::mpsc::channel::<Vec<u8>>(1000 * 30);
     let tun_reader = tun.clone();
     let tun_writer = tun.clone();
 
@@ -670,10 +672,11 @@ pub async fn start_tun_forwarding(
                     // Проверка отмены
                     if cancellation_token.is_cancelled() {
                         tun_sender.closed().await;
-                        println!("❌ Поток чтения из TUN остановлен (1).");
+                        println!("❌ Поток чтения из TUN отменен.");
                         break;
-                    }//else{println!("поток 1 работает...")}
-    
+                    }
+
+                    // Таймаут при чтении из TUN
                     let result = timeout(timeout_duration, tun_reader.read()).await;
                     match result {
                         Ok(Ok(buf)) => {
@@ -695,7 +698,9 @@ pub async fn start_tun_forwarding(
                 }
             }
         });
-    
+    }
+    {
+
         // Поток для чтения данных из канала
         tokio::spawn({
             let cancellation_token = cancellation_token.clone(); 
