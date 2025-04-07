@@ -3,6 +3,7 @@ use std::{
     io::{Read, Write},
     net::Ipv4Addr,
     os::fd::{AsRawFd, FromRawFd},
+    process::Command,
     sync::Arc,
 };
 
@@ -60,7 +61,7 @@ impl AsyncTun {
             sc_family: AF_SYSTEM as u8,
             ss_sysaddr: AF_SYS_CONTROL as u16,
             sc_id: info.ctl_id,
-            sc_unit: 0, // автоназначение utunX
+            sc_unit: 0,
             sc_reserved: [0; 5],
         };
 
@@ -76,7 +77,6 @@ impl AsyncTun {
         }
         println!("✅ connect() OK, интерфейс поднят");
 
-        // Получаем имя utunX через getsockopt
         let mut name_buf = [0u8; 128];
         let mut name_len = name_buf.len() as u32;
 
@@ -84,7 +84,7 @@ impl AsyncTun {
             libc::getsockopt(
                 raw_fd,
                 SYSPROTO_CONTROL,
-                2, // UTUN_OPT_IFNAME
+                2,
                 name_buf.as_mut_ptr() as *mut _,
                 &mut name_len,
             )
@@ -98,6 +98,22 @@ impl AsyncTun {
         };
 
         println!("🎉 Реально создан интерфейс: {}", ifname);
+
+        // Назначаем IP, destination, netmask через ifconfig
+        let status = Command::new("ifconfig")
+            .args([
+                &ifname,
+                &address.to_string(),
+                &destination.to_string(),
+                "netmask",
+                &netmask.to_string(),
+                "up",
+            ])
+            .status()?;
+
+        if !status.success() {
+            return Err("ifconfig failed to configure utun".into());
+        }
 
         let file = unsafe { File::from_raw_fd(raw_fd) };
         let async_fd = AsyncFd::new(file)?;

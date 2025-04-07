@@ -587,7 +587,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("🌐 IP = {:?}, DNS = {:?}", info.ip, info.dns1);
         
         //tunel start
-         setup_and_start_tunnel(stream, Ipv4Addr::from(info.ip)).await?;
+        setup_and_start_tunnel(stream, Ipv4Addr::from(info.ip)).await;
 
         println!("🟢 TUN активен, туннелирование запущено. Ждём трафик...");  
 
@@ -644,9 +644,7 @@ pub async fn start_tun_forwarding(
 
     //📤 uplink: TUN → SSTP
     {
-        //let dev = dev.clone();
         let tun_sender = tun_sender.clone();
-
         tokio::spawn(async move {
             loop {
                 let buf = match tun_reader.read().await {
@@ -655,13 +653,26 @@ pub async fn start_tun_forwarding(
                         eprintln!("❌ Ошибка чтения из TUN: {e}");
                         continue;
                     }
-                };
+                };                
                 let ip_data = &buf[4..buf.len()]; // пропускаем 4 байта заголовка macOS TUN
+                //println!("RECEIVE from tun\t: ({} байт): {:02X?}", ip_data.len(), &ip_data[..ip_data.len()]);
                 let packet = wrap_ip_in_ppp_sstp(&ip_data);
                 match tun_sender.send(packet).await {
-                    Ok(_) => (), //println!("✅ Пакет успешно отправлен в SSTP очередь")
-                    Err(e) => eprintln!("❌ Ошибка отправки: {e}"),
+                    Ok(_) => (),//println!("📤 Отправлено в канал SSTP")
+                    Err(e) => eprintln!("❌ Ошибка отправки в канал: {e}"),
                 }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        });
+    
+        // Поток для чтения данных из канала
+        tokio::spawn(async move {
+            while let Some(packet) = tun_receiver.recv().await {
+                let mut writer = writer.lock().await;
+                if let Err(e) = writer.write_all(&packet).await {
+                    eprintln!("❌ Ошибка записи в SSTP: {e}");
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
             }
         });
     }
@@ -686,7 +697,7 @@ pub async fn start_tun_forwarding(
                         break;
                     }
                 };
-                //println!("RECEIVE\t: ({} байт): {:02X?}", n, &buf[..n]);
+                //println!("RECEIVE from sstp\t: ({} байт): {:02X?}", n, &buf[..n]);
 
                 if buf[..n].starts_with(&[0x10, 0x01]) && buf[4..6] == [0x00, 0x05]
                 {
@@ -711,22 +722,9 @@ pub async fn start_tun_forwarding(
                         Err(e) => eprintln!("❌ Ошибка записи в TUN очередь: {e}"),
                     }
                 }
+                tokio::time::sleep(Duration::from_millis(5)).await;
             }
         });
-        
-        // ✉️ Поток записи в SSTP из tun_sender
-        {
-            let mut tun_receiver = tun_receiver;
-            let writer = writer.clone();
-            tokio::spawn(async move {
-                while let Some(packet) = tun_receiver.recv().await {
-                    let mut writer = writer.lock().await;
-                    if let Err(e) = writer.write_all(&packet).await {
-                        eprintln!("❌ Ошибка записи в SSTP: {e}");
-                    }
-                }
-            });
-        }
 
         // ✉️ Поток записи в TUN из sstp_sender
         {
@@ -735,11 +733,13 @@ pub async fn start_tun_forwarding(
                     if let Err(e) = tun_writer.write(&packet).await {
                         eprintln!("❌ Ошибка записи в TUN: {e}");
                     }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
                 }
             });
         }
-        println!("Thread reading and writing started.")
     }
+    
+    println!("!!! Thread reading and writing started.");
 
     Ok(())
 }
