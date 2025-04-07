@@ -676,12 +676,15 @@ pub async fn start_tun_forwarding(
                         break;
                     }
 
+                    //let mut tun_timer = Instant::now();
                     // Таймаут при чтении из TUN
                     let result = timeout(timeout_duration, tun_reader.read()).await;
+                    
                     match result {
                         Ok(Ok(buf)) => {
                             let ip_data = &buf[4..buf.len()]; // пропускаем 4 байта заголовка macOS TUN
                             let packet = wrap_ip_in_ppp_sstp(&ip_data);
+                            //println!("📥 tun read packet size {} time: {} µs", packet.len(), tun_timer.elapsed().as_millis());
                             match tun_sender.send(packet).await {
                                 Ok(_) => (),
                                 Err(e) => eprintln!("❌ Ошибка отправки в канал: {e}"),
@@ -794,6 +797,9 @@ pub async fn start_tun_forwarding(
             tokio::spawn({
                 let cancellation_token = cancellation_token.clone(); 
                 async move {
+                    let mut total_bytes = 0;
+                    let period = 5;
+                    let mut start = Instant::now();
                     loop{
                         select! {
                             _ = cancellation_token.cancelled() => {
@@ -801,9 +807,20 @@ pub async fn start_tun_forwarding(
                                 break;
                             }
                             Some(packet) = sstp_receiver.recv() => {
+                                total_bytes += packet.len();
+
+                                //let mut tun_timer = Instant::now();
                                 if let Err(e) = tun_writer.write(&packet).await {
                                     eprintln!("❌ Ошибка записи в TUN: {e}");
                                 }
+                                if start.elapsed() >= Duration::from_secs(period) {
+                                    let seconds = start.elapsed().as_secs_f64(); // точнее, чем period * 1.0
+                                    let speed = ((total_bytes as f64 / seconds) as f64 / 1024 as f64) as u32;
+                                    println!("📈 [Запись TUN] Скорость: {} кб/сек", speed);
+                                    total_bytes = 0;
+                                    start = Instant::now();
+                                }
+                                //println!("📥 tun write packet size {} time: {} µs", packet.len(), tun_timer.elapsed().as_millis());
                                 tokio::task::yield_now().await;
                             }
                             else => {
