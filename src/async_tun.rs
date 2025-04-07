@@ -21,11 +21,14 @@ pub struct AsyncTun {
 
 impl AsyncTun {
     pub fn new(
+        vpn_server: Ipv4Addr,
         address: Ipv4Addr,
         destination: Ipv4Addr,
         netmask: Ipv4Addr,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         println!("🚀 AsyncTun::new() — старт");
+
+        Self::config_routes(vpn_server);
 
         let raw_fd = unsafe {
             libc::socket(AF_SYSTEM, libc::SOCK_DGRAM, SYSPROTO_CONTROL)
@@ -77,6 +80,8 @@ impl AsyncTun {
         }
         println!("✅ connect() OK, интерфейс поднят");
 
+        //Self::add_default_route("tnu");
+
         let mut name_buf = [0u8; 128];
         let mut name_len = name_buf.len() as u32;
 
@@ -120,11 +125,63 @@ impl AsyncTun {
 
         println!("🎉 AsyncTun создан!");
 
+        Self::add_default("utun9");
+
         Ok(Self {
             inner: Arc::new(async_fd),
             read_buf: Arc::new(Mutex::new([0u8; 1504])),
             ifname,
         })
+    }
+
+    fn config_routes(vpn_server: Ipv4Addr) -> Result<(), Box<dyn std::error::Error>>   {
+
+         // добавить роут до vpn server'a чере маршрутизатор
+         //sudo route add -host SSTP_SERVER_IP_ADDRESS 192.168.1.1
+         let status = Command::new("route")
+         .args([
+            "add",
+             "-host",
+             &vpn_server.to_string(),
+             "192.168.1.1"
+         ])
+         .status()?;
+        if !status.success() {
+            return Err("add route failed to configure utun".into());
+        }
+        //sudo route -n delete -net default
+         let status = Command::new("route")
+         .args([
+            "-n",
+             "delete",
+             "-net",
+             "default"
+         ])
+         .status()?;
+        if !status.success() {
+            return Err("error remove default route".into());
+        }
+        Ok(())
+    }
+
+    fn add_default(tun_name: &str) -> Result<(), Box<dyn std::error::Error>>   {
+
+         // добавить дефолтный роут через наш интерфейс
+         //sudo route -n add -net default -interface utun9
+         let status = Command::new("route")
+         .args([
+             "-n",
+             "add",
+             "-net",
+             "default",
+             "-interface",
+             tun_name,
+         ])
+         .status()?;
+        if !status.success() {
+            return Err("add route failed to configure utun".into());
+        }
+        Ok(())
     }
 
     pub async fn read(&self) -> std::io::Result<Vec<u8>> {
@@ -151,4 +208,5 @@ impl AsyncTun {
     pub fn name(&self) -> &str {
         &self.ifname
     }
+
 }

@@ -9,6 +9,7 @@ use sstp_rust::DEBUG_PARSE;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::io;
+use std::str::FromStr;
 use tokio::time::{sleep, Duration};
 use std::io::Read;
 use std::io::Write;
@@ -587,7 +588,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("🌐 IP = {:?}, DNS = {:?}", info.ip, info.dns1);
         
         //tunel start
-        setup_and_start_tunnel(stream, Ipv4Addr::from(info.ip)).await;
+        setup_and_start_tunnel(stream, server_ip, Ipv4Addr::from(info.ip)).await;
 
         println!("🟢 TUN активен, туннелирование запущено. Ждём трафик...");  
 
@@ -609,14 +610,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Финальный шаг после PPP FSM: создаём TUN и запускаем туннелирование
-pub async fn setup_and_start_tunnel(stream: TlsStream<TcpStream>, ip: Ipv4Addr) -> std::io::Result<()> {
+pub async fn setup_and_start_tunnel(stream: TlsStream<TcpStream>, server_ip: &str, ip: Ipv4Addr) -> std::io::Result<()> {
 
+    let vpn_server_ip = Ipv4Addr::from_str(&server_ip)
+    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;;
     
     let dev = AsyncTun::new(
+        vpn_server_ip,
         ip,
         ip,
         Ipv4Addr::new(255, 255, 255, 0),
-    ).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;;
+    ).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
     println!("запустили TUN:{}", dev.name());
 
