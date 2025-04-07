@@ -723,7 +723,7 @@ pub async fn start_tun_forwarding(
                     buf.extend_from_slice(&[0x00, 0x00, 0x00, 0x02]); // AF_INET
                     buf.extend_from_slice(&ip_data); // сам IP-пакет
 
-                    let duration = start.elapsed(); // Получаем время выполнения
+                    //let duration = start.elapsed(); // Получаем время выполнения
                     //println!("Время выполнения: {:?} (секунды)", duration);
 
                     match sstp_sender.send(buf).await {
