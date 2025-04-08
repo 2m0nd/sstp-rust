@@ -2,7 +2,7 @@ use std::{
     fs::File,
     io::{Read, Write},
     net::Ipv4Addr,
-    os::fd::{AsRawFd, FromRawFd},
+    os::fd::FromRawFd,
     process::Command,
     sync::Arc,
 };
@@ -59,7 +59,7 @@ impl AsyncTun {
 
         println!("✅ ioctl CTLIOCGINFO success, ctl_id = {}", info.ctl_id);
 
-        let mut addr = sockaddr_ctl {
+        let addr = sockaddr_ctl {
             sc_len: std::mem::size_of::<sockaddr_ctl>() as u8,
             sc_family: AF_SYSTEM as u8,
             ss_sysaddr: AF_SYS_CONTROL as u16,

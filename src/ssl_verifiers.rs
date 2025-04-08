@@ -1,5 +1,5 @@
 use tokio_rustls::rustls::{
-    Certificate, ClientConfig, Error as TLSError, ServerName,
+    Certificate, Error as TLSError, ServerName,
     client::ServerCertVerifier,
     client::ServerCertVerified,
 };

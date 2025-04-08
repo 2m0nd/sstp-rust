@@ -6,16 +6,6 @@ use crate::parser::parse_ppp_frame;
 use crate::parser::PppParsedFrame;
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use tokio::{net::TcpStream};
-use tokio_rustls::TlsConnector;
-use tokio_rustls::rustls::{
-    Certificate, ClientConfig, Error as TLSError, ServerName,
-    client::ServerCertVerifier,
-    client::ServerCertVerified,
-};
-use tokio::{io::{ split, ReadHalf, WriteHalf}};
-use tun::{platform::Device as Tun};
-use tokio_rustls::client::TlsStream;
 
 
 pub async fn read_and_parse_all<R: AsyncRead + Unpin>(
@@ -129,7 +119,7 @@ fn parse_all_ppp_packets(buf: &mut Vec<u8>) -> Vec<PppParsedFrame> {
 
 
 pub fn build_sstp_hello(correlation_id: Uuid) -> Vec<u8> {
-    let mut hello = vec![
+    let hello = vec![
         0x10, 0x01,       // Version (1.0) + Control Bit
         0x00, 0x0E,       // Length = 14 bytes
         0x00, 0x01,       // Message Type = Call Connect Request
@@ -553,7 +543,7 @@ pub fn build_ipcp_request_any_ip(id: u8) -> Vec<u8> {
 }
 
 pub fn build_ipcp_request_with(ip: [u8; 4], dns: [u8; 4], id: u8) -> Vec<u8> {
-    let mut options = vec![
+    let options = vec![
         0x03, 0x06, ip[0], ip[1], ip[2], ip[3],
         0x81, 0x06, dns[0], dns[1], dns[2], dns[3],
     ];
@@ -561,7 +551,7 @@ pub fn build_ipcp_request_with(ip: [u8; 4], dns: [u8; 4], id: u8) -> Vec<u8> {
 }
 
 pub fn build_ipcp_request_with_only_ip(ip: [u8; 4], id: u8) -> Vec<u8> {
-    let mut options = vec![
+    let options = vec![
         0x03, 0x06, ip[0], ip[1], ip[2], ip[3]
     ];
     wrap_ipcp_packet(0x01, id, &options)

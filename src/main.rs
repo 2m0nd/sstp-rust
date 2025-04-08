@@ -6,13 +6,11 @@ use async_tun::add_default_before;
 use async_tun::AsyncTun;
 use log::*;
 use tokio::select;
-use route::*;
 use sstp_rust::DEBUG_PARSE;
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::io;
 use std::str::FromStr;
-use tokio::time::{sleep, Duration, timeout};
+use tokio::time::{Duration, timeout};
 use std::io::Read;
 use std::io::Write;
 use std::net::Ipv4Addr;
@@ -23,26 +21,20 @@ use crate::sstp::*;
 use crate::parser::*;
 use ssl_verifiers::DisabledVerifier;
 use uuid::Uuid;
-use tun::{create, Configuration, platform::Device};
-use tokio::io::{AsyncRead, AsyncWrite};
 use std::sync::Arc;
-use std::sync::Mutex;
 use tokio::sync::Mutex as TokioMutex;
 use std::net::IpAddr;
 use tokio::{net::TcpStream, io::{AsyncReadExt, AsyncWriteExt}};
 use tokio_rustls::TlsConnector;
 use std::time::{ Instant};
 use tokio_rustls::rustls::{
-    Certificate, ClientConfig, Error as TLSError, ServerName,
-    client::ServerCertVerifier,
-    client::ServerCertVerified,
+    ClientConfig, ServerName,
 };
 use tokio::{io::{ split, ReadHalf, WriteHalf}};
-use tun::{platform::Device as Tun};
 use tokio_rustls::client::TlsStream;
 mod dhcp;
 use dhcp::*;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug)]
@@ -136,7 +128,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let n = stream.read(&mut buf).await?;
     println!("📥 Ответ на Hello ({} байт): {:02X?}", n, &buf[..n]);
 
-    let mut buf = [0u8; 1500];
+    let buf = [0u8; 1500];
     let mut state = PppState::SendLcpRequest;
     let mut id_counter: u8 = 0;
 
@@ -645,9 +637,9 @@ pub async fn setup_and_start_tunnel(
 
 /// Стартует IP-туннель: обменивается трафиком между SSTP и TUN
 pub async fn start_tun_forwarding(
-    mut tun: AsyncTun,
+    tun: AsyncTun,
     mut reader: ReadHalf<TlsStream<TcpStream>>,
-    mut writer: WriteHalf<TlsStream<TcpStream>>,
+    writer: WriteHalf<TlsStream<TcpStream>>,
     cancellation_token: CancellationToken,
 ) -> std::io::Result<()> {
     println!("🟢 TUN активен. Запускаем туннелирование...");
