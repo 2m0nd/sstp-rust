@@ -1,8 +1,9 @@
+use route::*;
 use std::{
     fs::File,
     io::{Read, Write},
     net::Ipv4Addr,
-    os::fd::FromRawFd,
+    os::{fd::FromRawFd, unix::raw},
     process::Command,
     sync::Arc,
 };
@@ -11,6 +12,8 @@ use tokio::io::unix::AsyncFd;
 use tokio::sync::Mutex;
 
 use nix::libc::{sockaddr_ctl, ctl_info, AF_SYSTEM, AF_SYS_CONTROL, SYSPROTO_CONTROL};
+
+use crate::route;
 
 #[derive(Clone)]
 pub struct AsyncTun {
@@ -26,20 +29,33 @@ impl AsyncTun {
         destination: Ipv4Addr,
         netmask: Ipv4Addr,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        println!("🚀 AsyncTun::new() — старт");
+        println!("🚀 AsyncTun::new()");
+        config_routes(vpn_server).expect("Expect ok.");
+        let (ifname, raw_fd) = Self::init_tun_interface().expect("Failed to init TUN interface");;
+        Self::setup_ip(address, destination, netmask, ifname.clone()).expect("Failed setup ip for TUN interface");
+        let file = unsafe { File::from_raw_fd(raw_fd) };
+        let async_fd = AsyncFd::new(file)?;
+        let tun_info = Self{
+            inner: Arc::new(async_fd),
+            read_buf: Arc::new(Mutex::new([0u8; 1504])),
+            ifname,
+        };
+        println!("🎉 AsyncTun created & configured!");
+        Self::add_default("utun9").expect("Expect ok.");
+        Ok(tun_info)
+    }
 
-        Self::config_routes(vpn_server);
-
+    fn init_tun_interface() -> Result<(String, i32), Box<dyn std::error::Error>> {
         let raw_fd = unsafe {
             libc::socket(AF_SYSTEM, libc::SOCK_DGRAM, SYSPROTO_CONTROL)
         };
-
+    
         if raw_fd < 0 {
             return Err(std::io::Error::last_os_error().into());
         }
-
+    
         println!("📦 Сокет создан: fd = {}", raw_fd);
-
+    
         let mut info = ctl_info {
             ctl_id: 0,
             ctl_name: [0; 96],
@@ -48,17 +64,17 @@ impl AsyncTun {
         for (dst, src) in info.ctl_name.iter_mut().zip(name.iter()) {
             *dst = *src as i8;
         }
-
+    
         println!("📞 Отправляем ioctl...");
-
+    
         if unsafe { libc::ioctl(raw_fd, libc::CTLIOCGINFO, &mut info) } < 0 {
             println!("❌ ioctl CTLIOCGINFO failed");
             unsafe { libc::close(raw_fd) };
             return Err("ioctl CTLIOCGINFO failed".into());
         }
-
+    
         println!("✅ ioctl CTLIOCGINFO success, ctl_id = {}", info.ctl_id);
-
+    
         let addr = sockaddr_ctl {
             sc_len: std::mem::size_of::<sockaddr_ctl>() as u8,
             sc_family: AF_SYSTEM as u8,
@@ -67,10 +83,10 @@ impl AsyncTun {
             sc_unit: 0,
             sc_reserved: [0; 5],
         };
-
+    
         let addr_ptr = &addr as *const sockaddr_ctl as *const libc::sockaddr;
         let addr_len = std::mem::size_of::<sockaddr_ctl>() as libc::socklen_t;
-
+    
         println!("🔌 Пытаемся подключиться к утилите...");
         let res = unsafe { libc::connect(raw_fd, addr_ptr, addr_len) };
         if res < 0 {
@@ -79,12 +95,10 @@ impl AsyncTun {
             return Err("connect() to utun control failed".into());
         }
         println!("✅ connect() OK, интерфейс поднят");
-
-        //Self::add_default_route("tnu");
-
+    
         let mut name_buf = [0u8; 128];
         let mut name_len = name_buf.len() as u32;
-
+    
         let ret = unsafe {
             libc::getsockopt(
                 raw_fd,
@@ -94,74 +108,17 @@ impl AsyncTun {
                 &mut name_len,
             )
         };
-
+    
         let ifname = if ret < 0 {
             println!("❌ getsockopt(UTUN_OPT_IFNAME) failed: {}", std::io::Error::last_os_error());
             "unknown".into()
         } else {
             String::from_utf8_lossy(&name_buf[..(name_len as usize - 1)]).to_string()
         };
-
+        
         println!("🎉 Реально создан интерфейс: {}", ifname);
 
-        // Назначаем IP, destination, netmask через ifconfig
-        let status = Command::new("ifconfig")
-            .args([
-                &ifname,
-                &address.to_string(),
-                &destination.to_string(),
-                "netmask",
-                &netmask.to_string(),
-                "up",
-            ])
-            .status()?;
-
-        if !status.success() {
-            return Err("ifconfig failed to configure utun".into());
-        }
-
-        let file = unsafe { File::from_raw_fd(raw_fd) };
-        let async_fd = AsyncFd::new(file)?;
-
-        println!("🎉 AsyncTun создан!");
-
-        Self::add_default("utun9");
-
-        Ok(Self {
-            inner: Arc::new(async_fd),
-            read_buf: Arc::new(Mutex::new([0u8; 1504])),
-            ifname,
-        })
-    }
-
-    fn config_routes(vpn_server: Ipv4Addr) -> Result<(), Box<dyn std::error::Error>>   {
-
-         // добавить роут до vpn server'a чере маршрутизатор
-         //sudo route add -host SSTP_SERVER_IP_ADDRESS 192.168.1.1
-         let status = Command::new("route")
-         .args([
-            "add",
-             "-host",
-             &vpn_server.to_string(),
-             "192.168.1.1"
-         ])
-         .status()?;
-        if !status.success() {
-            return Err("add route failed to configure utun".into());
-        }
-        //sudo route -n delete -net default
-         let status = Command::new("route")
-         .args([
-            "-n",
-             "delete",
-             "-net",
-             "default"
-         ])
-         .status()?;
-        if !status.success() {
-            return Err("error remove default route".into());
-        }
-        Ok(())
+        Ok((ifname, raw_fd))
     }
 
     fn add_default(tun_name: &str) -> Result<(), Box<dyn std::error::Error>>   {
@@ -208,44 +165,24 @@ impl AsyncTun {
     pub fn name(&self) -> &str {
         &self.ifname
     }
+    
+    fn setup_ip(address: Ipv4Addr, destination: Ipv4Addr, netmask: Ipv4Addr, ifname: String) 
+    -> Result<(), Box<dyn std::error::Error>> {
+        let status = Command::new("ifconfig")
+            .args([
+                &ifname,
+                &address.to_string(),
+                &destination.to_string(),
+                "netmask",
+                &netmask.to_string(),
+                "up",
+            ])
+            .status()?;
 
-}
+        if !status.success() {
+            return Err("ifconfig failed to configure utun".into());
+        }
+        Ok(())
+    }
 
-
-pub fn add_default_before() -> Result<(), Box<dyn std::error::Error>>   {
-
-    let status = Command::new("route")
-    .args([
-       "-n",
-        "delete",
-        "-net",
-        "default"
-    ])
-    .status()?;
-   if !status.success() {
-       return Err("error remove default route".into());
-   }
-
-    // добавить дефолтный роут через wifi
-    //sudo route -n add -net default -interface en0
-    let status = Command::new("ifconfig")
-    .args([
-        "en0",
-        "down"
-    ])
-    .status()?;
-   if !status.success() {
-       return Err("add route failed to configure utun".into());
-   }
-
-   let status = Command::new("ifconfig")
-   .args([
-       "en0",
-       "up"
-   ])
-   .status()?;
-  if !status.success() {
-      return Err("add route failed to configure utun".into());
-  }
-   Ok(())
 }

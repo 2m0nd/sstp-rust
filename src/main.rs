@@ -2,7 +2,7 @@ mod sstp;
 mod log;
 mod route;
 mod async_tun;
-use async_tun::add_default_before;
+use route::*;
 use async_tun::AsyncTun;
 use log::*;
 use tokio::select;
@@ -599,7 +599,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         tokio::signal::ctrl_c().await.expect("Failed to listen for ctrl-c");    
 
-        let _ = add_default_before();
+        let _ = restore_default_route();
 
         std::process::exit(0);
 

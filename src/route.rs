@@ -1,28 +1,71 @@
 use std::io;
+use std::net::Ipv4Addr;
 use std::process::Command;
 
-pub fn set_default_route_utun9() -> io::Result<()> {
-    println!("🟢 Adding default IPv4 route via utun9 using system command...");
-    let status = Command::new("/sbin/route")
-        .args(["-n", "add", "-inet", "default", "-interface", "utun9"])
-        .status()?;
+pub fn config_routes(vpn_server: Ipv4Addr) -> Result<(), Box<dyn std::error::Error>>   {
 
-    if status.success() {
-        println!("✅ Default route added via utun9!");
-        Ok(())
-    } else {
-        eprintln!("⚠️ Route add failed — might already exist.");
-        Err(io::Error::new(io::ErrorKind::Other, format!("Route command failed with status: {}", status)))
-    }
+    // добавить роут до vpn server'a чере маршрутизатор
+    //sudo route add -host SSTP_SERVER_IP_ADDRESS 192.168.1.1
+    let status = Command::new("route")
+    .args([
+       "add",
+        "-host",
+        &vpn_server.to_string(),
+        "192.168.1.1"
+    ])
+    .status()?;
+   if !status.success() {
+       return Err("add route failed to configure utun".into());
+   }
+   //sudo route -n delete -net default
+    let status = Command::new("route")
+    .args([
+       "-n",
+        "delete",
+        "-net",
+        "default"
+    ])
+    .status()?;
+   if !status.success() {
+       return Err("error remove default route".into());
+   }
+   Ok(())
 }
 
-fn get_utun_index(name: &str) -> io::Result<u16> {
-    use std::ffi::CString;
-    let name = CString::new(name).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid interface name"))?;
-    let idx = unsafe { libc::if_nametoindex(name.as_ptr()) };
-    if idx == 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(idx as u16)
-    }
+pub fn restore_default_route() -> Result<(), Box<dyn std::error::Error>>   {
+
+    let status = Command::new("route")
+    .args([
+       "-n",
+        "delete",
+        "-net",
+        "default"
+    ])
+    .status()?;
+   if !status.success() {
+       return Err("error remove default route".into());
+   }
+
+    // добавить дефолтный роут через wifi
+    //sudo route -n add -net default -interface en0
+    let status = Command::new("ifconfig")
+    .args([
+        "en0",
+        "down"
+    ])
+    .status()?;
+   if !status.success() {
+       return Err("add route failed to configure utun".into());
+   }
+
+   let status = Command::new("ifconfig")
+   .args([
+       "en0",
+       "up"
+   ])
+   .status()?;
+  if !status.success() {
+      return Err("add route failed to configure utun".into());
+  }
+   Ok(())
 }
