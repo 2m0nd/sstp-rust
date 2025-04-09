@@ -12,20 +12,13 @@ use crate::log::*;
 use crate::sstp::*;
 use crate::parser::*;
 use crate::dhcp::*;
-use crate::ssl_verifiers::*;
 use uuid::Uuid;
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
-use std::net::IpAddr;
 use tokio::{net::TcpStream, io::{AsyncReadExt, AsyncWriteExt}};
-use tokio_rustls::TlsConnector;
 use std::time::Instant;
-use tokio_rustls::rustls::{
-    ClientConfig, ServerName,
-};
 use tokio::io::{ split, ReadHalf, WriteHalf};
 use tokio_rustls::client::TlsStream;
-use std::sync::atomic::Ordering;
 use crate::types::PppSessionInfo;
 use crate::types::PppState;
 
