@@ -3,7 +3,7 @@ use std::{
     fs::File,
     io::{Read, Write},
     net::Ipv4Addr,
-    os::{fd::FromRawFd, unix::raw},
+    os::fd::FromRawFd,
     process::Command,
     sync::Arc,
 };

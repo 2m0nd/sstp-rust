@@ -42,9 +42,6 @@ pub fn parse_dhcp_ack_from_ip_payload(payload: &[u8]) -> Option<HashMap<u8, Vec<
     Some(options)
 }
 
-
-
-
 pub fn build_dhcp_inform_ppp_packet(client_ip: [u8; 4]) -> Vec<u8> {
     let mut rng = rand::thread_rng();
     let xid = rng.gen::<u32>();

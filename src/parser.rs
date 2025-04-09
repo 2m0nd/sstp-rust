@@ -4,7 +4,6 @@ use std::sync::atomic::Ordering;
 
 use crate::DEBUG_PARSE;
 
-
 pub struct PppParsedFrame {
     pub protocol: u16,
     pub code: u8,
