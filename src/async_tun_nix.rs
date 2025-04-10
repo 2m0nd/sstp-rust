@@ -34,8 +34,8 @@ impl AsyncTun {
         // Настраиваем IP-адрес
         Self::setup_ip(&ifname, address, destination, netmask)?;
 
-        // Добавляем маршрут до VPN-сервера
-        Self::add_route_to_server(&ifname, vpn_server)?;
+        // Добавляем маршрут до VPN-сервера через текущую рабочую сеть
+        Self::add_route_to_server("enp0s1", "192.168.1.1", vpn_server)?;
 
         // Добавляем маршрут по умолчанию через TUN
         Self::add_default_route(&ifname)?;
@@ -127,6 +127,7 @@ impl AsyncTun {
 
     fn add_route_to_server(
         ifname: &str,
+        gateway: &str,
         vpn_server: Ipv4Addr,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let status = Command::new("ip")
@@ -134,6 +135,8 @@ impl AsyncTun {
                 "route",
                 "add",
                 &vpn_server.to_string(),
+                "via",
+                gateway,
                 "dev",
                 ifname,
             ])
@@ -147,13 +150,42 @@ impl AsyncTun {
     }
 
     fn add_default_route(ifname: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let status = Command::new("ip")
-            .args(["route", "add", "default", "dev", ifname])
-            .status()?;
 
-        if !status.success() {
-            return Err("Failed to add default route through TUN interface".into());
+        println!("Try add default route through {}", ifname);
+
+        // Удаляем все default-маршруты
+        println!("🧹 Удаляем все default routes...");
+        let output = Command::new("ip")
+            .args(["route", "del", "default"])
+            .output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            // RTNETLINK answers: No such process — если нет default вообще
+            if !stderr.contains("No such process") {
+                return Err(format!("Failed to delete default route: {}", stderr).into());
+            }
         }
+        
+        // Проверка: есть ли уже default route через tun0
+        let check = Command::new("ip")
+        .args(["route", "show", "default", "dev", ifname])
+        .output()?;
+
+        if check.status.success() && !check.stdout.is_empty() {
+            println!("ℹ️ Default route через {} уже существует, пропускаем", ifname);
+            return Ok(());
+        }
+        let output = Command::new("ip")
+        .args(["route", "add", "default", "dev", ifname])
+        .output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("Failed to add default route through TUN interface: {}", stderr).into());
+        }
+
+        println!("✅ Default route через {} добавлен", ifname);
 
         Ok(())
     }
@@ -211,6 +243,18 @@ impl AsyncTun {
         if !status.success() {
             return Err("Failed to restore default route".into());
         }
+
+
+        // // удалим особый роут для vpn сервера
+        // let status = Command::new("ip")
+        //     .args(["sudo ip route del 109.69.58.140 via 192.168.1.1 dev enp0s1"
+        //     ])
+        //     .status()?;
+
+        // if !status.success() {
+        //     return Err("Failed to delete route vpn->router".into());
+        // }
+
 
         println!("✅ Default route восстановлен через {} ({})", iface, original_gateway);
         Ok(())
