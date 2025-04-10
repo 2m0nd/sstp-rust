@@ -185,4 +185,47 @@ impl AsyncTun {
         Ok(())
     }
 
+    pub fn restore_routes(
+        &self,
+        original_gateway: &str,
+        vpn_server: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let iface = "en0";
+        let status = Command::new("route")
+        .args([
+        "-n",
+            "delete",
+            "-net",
+            "default"
+        ])
+        .status()?;
+    if !status.success() {
+        return Err("error remove default route".into());
+    }
+
+        // добавить дефолтный роут через wifi
+        //sudo route -n add -net default -interface en0
+        let status = Command::new("ifconfig")
+        .args([
+            iface,
+            "down"
+        ])
+        .status()?;
+    if !status.success() {
+        return Err("add route failed to configure utun".into());
+    }
+
+    let status = Command::new("ifconfig")
+    .args([
+        iface,
+        "up"
+    ])
+    .status()?;
+    if !status.success() {
+        return Err("add route failed to configure utun".into());
+    }
+        println!("✅ Default route восстановлен через {} ({})", iface, original_gateway);
+        Ok(())
+    }
+
 }

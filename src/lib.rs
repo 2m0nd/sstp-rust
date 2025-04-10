@@ -6,6 +6,7 @@ pub mod types;
 pub mod parser;
 pub mod ssl_verifiers;
 pub mod dhcp;
+pub mod tools;
 #[cfg(target_os = "linux")]
 pub mod async_tun_nix;
 

@@ -5,6 +5,8 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+sha2 = "0.10"
+hex = "0.4"
 dotenvy = "0.15"
 nix = { version = "0.27", features = ["socket"] }
 libc = "0.2"
