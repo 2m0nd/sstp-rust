@@ -520,10 +520,10 @@ pub async fn run_sstm_state_machine(
 pub async fn setup_and_start_tunnel(
     stream: TlsStream<TcpStream>, 
     server_ip: &str, ip: Ipv4Addr,
-    cancellation_token: CancellationToken,) -> std::io::Result<()> {
+    cancellation_token: CancellationToken,) -> Result<AsyncTun, std::io::Error> {
 
     let vpn_server_ip = Ipv4Addr::from_str(&server_ip)
-    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;;
+    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     
     let dev = AsyncTun::new(
         vpn_server_ip,
@@ -538,7 +538,10 @@ pub async fn setup_and_start_tunnel(
     let (reader, writer) = split(stream);
 
     // ✅ Запускаем туннелирование
-    start_tun_forwarding(dev, reader, writer, cancellation_token).await
+    let dev_clone = dev.clone();
+    start_tun_forwarding(dev, reader, writer, cancellation_token).await;
+
+    Ok(dev_clone)
 }
 
 /// Стартует IP-туннель: обменивается трафиком между SSTP и TUN

@@ -3,6 +3,7 @@ use std::{
     io::{Read, Write},
     net::Ipv4Addr,
     os::fd::FromRawFd,
+    os::unix::io::AsRawFd,
     process::Command,
     sync::Arc,
 };
@@ -39,8 +40,8 @@ impl AsyncTun {
         // Добавляем маршрут по умолчанию через TUN
         Self::add_default_route(&ifname)?;
 
-        // Открываем файл устройства TUN
-        let file = File::open(format!("/dev/net/{}", ifname))?;
+        // Открываем устройство /dev/net/tun
+        let file = File::open("/dev/net/tun")?;
         let async_fd = AsyncFd::new(file)?;
 
         Ok(Self {
@@ -50,9 +51,35 @@ impl AsyncTun {
         })
     }
 
+    pub fn delete(ifname: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        println!("🧹 Удаляем интерфейс {}", ifname);
+        let status = Command::new("ip")
+            .args(["tuntap", "del", "dev", ifname, "mode", "tun"])
+            .status()?;
+
+        if !status.success() {
+            return Err(format!("Failed to delete TUN interface {}", ifname).into());
+        }
+
+        Ok(())
+    }
+
     fn create_tun_interface() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        let ifname = "tun0";
+
+        // Проверяем: существует ли интерфейс
+        let check = Command::new("ip")
+            .args(["link", "show", "dev", ifname])
+            .output()?;
+
+        if check.status.success() {
+            println!("⚠️ Интерфейс {} уже существует, удаляем...", ifname);
+            let _ = Self::delete(ifname)?;
+        }
+
+        // Создаём заново
         let output = Command::new("ip")
-            .args(["tuntap", "add", "mode", "tun", "name", "tun0"])
+            .args(["tuntap", "add", "mode", "tun", "name", ifname])
             .output()?;
 
         if !output.status.success() {
@@ -63,20 +90,21 @@ impl AsyncTun {
             .into());
         }
 
-        Ok("tun0".to_string())
+        Ok(ifname.to_string())
     }
 
     fn setup_ip(
         ifname: &str,
         address: Ipv4Addr,
-        destination: Ipv4Addr,
+        _destination: Ipv4Addr,
         netmask: Ipv4Addr,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let cidr = mask_to_cidr(netmask)?;
         let status = Command::new("ip")
             .args([
                 "addr",
                 "add",
-                &format!("{}/{}", address, netmask),
+                &format!("{}/{}", address, cidr),
                 "dev",
                 ifname,
             ])
@@ -151,7 +179,67 @@ impl AsyncTun {
         }
     }
 
+    pub fn restore_routes(
+        &self,
+        original_gateway: &str,
+        vpn_server: &str,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let iface = "enp0s1";
+        // Удалить маршрут к VPN через основной интерфейс
+        let _ = Command::new("ip")
+            .args(["route", "del", &vpn_server.to_string()])
+            .status();
+
+        // Удалить default через туннель
+        let _ = Command::new("ip")
+            .args(["route", "del", "default"])
+            .status();
+
+        // Вернуть дефолт через основной шлюз
+        let status = Command::new("ip")
+            .args([
+                "route",
+                "add",
+                "default",
+                "via",
+                &original_gateway.to_string(),
+                "dev",
+                iface,
+            ])
+            .status()?;
+
+        if !status.success() {
+            return Err("Failed to restore default route".into());
+        }
+
+        println!("✅ Default route восстановлен через {} ({})", iface, original_gateway);
+        Ok(())
+    }
+
     pub fn name(&self) -> &str {
         &self.ifname
     }
+}
+
+/// Преобразует netmask (например, 255.255.255.0) → CIDR (например, 24)
+fn mask_to_cidr(mask: Ipv4Addr) -> Result<u8, Box<dyn std::error::Error + Send + Sync>> {
+    let octets = mask.octets();
+    let mut bits = 0;
+
+    for byte in octets.iter() {
+        match byte {
+            255 => bits += 8,
+            254 => bits += 7,
+            252 => bits += 6,
+            248 => bits += 5,
+            240 => bits += 4,
+            224 => bits += 3,
+            192 => bits += 2,
+            128 => bits += 1,
+            0 => break,
+            _ => return Err("Invalid netmask".into()),
+        }
+    }
+
+    Ok(bits)
 }

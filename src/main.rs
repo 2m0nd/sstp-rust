@@ -20,6 +20,8 @@ use tokio_util::sync::CancellationToken;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
+    println!("Start vpn client...");
+
     let (server_ip, user, pwd) = get_credentials().expect("Not allowed parameters");
     
     let ssl_addr = format!("{server_ip}:443");
@@ -59,14 +61,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
         
         //tunel start
-        setup_and_start_tunnel(stream, &server_ip, Ipv4Addr::from(info.ip), cancellation_token)
+        let tun = setup_and_start_tunnel(stream, &server_ip, Ipv4Addr::from(info.ip), cancellation_token)
                 .await.expect("Failed start tunel");
 
         println!("🟢TUN активен, туннелирование запущено. Ждём трафик...");  
 
         tokio::signal::ctrl_c().await.expect("Failed to listen for ctrl-c");    
 
-        restore_default_route().expect("Failed reset default routes");
+        tun.restore_routes("192.168.1.1", &server_ip).expect("Failed reset default routes");
 
         std::process::exit(0);
 
