@@ -4,7 +4,7 @@ This is a Rust-based implementation of an SSTP (Secure Socket Tunneling Protocol
 
 ## Features
 
-- **SSTP Protocol Support**: Implements the SSTP protocol for secure communication.
+- **SSTP Protocol Support**: Implements the SSTP protocol for secure communication. [docs](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-sstp/c50ed240-56f3-4309-8e0c-1644898f0ea8)
 - **TUN Interface Management**: Creates and configures TUN interfaces for routing traffic.
 - **PPP State Machine**: Handles the PPP (Point-to-Point Protocol) negotiation process.
 - **DHCP Support**: Sends DHCP INFORM requests to retrieve network configuration.
