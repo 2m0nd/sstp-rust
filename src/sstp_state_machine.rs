@@ -7,7 +7,6 @@ use tokio::time::{Duration, timeout};
 use std::io::Write;
 use std::net::Ipv4Addr;
 use anyhow::Result;
-use crate::async_tun::AsyncTun;
 use crate::log::*;
 use crate::sstp::*;
 use crate::parser::*;
@@ -21,6 +20,11 @@ use tokio::io::{ split, ReadHalf, WriteHalf};
 use tokio_rustls::client::TlsStream;
 use crate::types::PppSessionInfo;
 use crate::types::PppState;
+#[cfg(target_os = "linux")]
+use crate::async_tun_nix::AsyncTun;
+
+#[cfg(not(target_os = "linux"))]
+use crate::async_tun::AsyncTun;
 
 pub async fn run_sstm_state_machine(
     server_ip: &str,

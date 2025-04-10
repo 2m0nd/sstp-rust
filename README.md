@@ -36,10 +36,10 @@ This is a Rust-based implementation of an SSTP (Secure Socket Tunneling Protocol
 
 2. Build the project:
    ```bash
-   cargo build --release
+   make build
    ```
 
-   Binaries will be located in `./target/release/sstp-rust`.
+   Binaries will be located in `./target-linux/release/sstp-rust` or `./target-macos/release/sstp-rust`.
 
 3. Configure the environment:
    - Add a `.env` file and use the command:
