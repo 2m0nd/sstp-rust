@@ -51,6 +51,7 @@ This is a Rust-based implementation of an SSTP (Secure Socket Tunneling Protocol
      SSTP_SERVER=ip_sst_serber
      SSTP_USER=grou\\user
      SSTP_PASSWORD=secret
+     SERVER_CERT_FINGERPRINT=no-check or SHA256 fingerprint from vpn server
      ```
 
    - Alternatively, use the inline command:
