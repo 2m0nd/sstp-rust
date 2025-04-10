@@ -170,6 +170,17 @@ impl AsyncTun {
         gateway: &str,
         vpn_server: Ipv4Addr,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Проверяем: есть ли уже маршрут к VPN-серверу
+    let check = Command::new("ip")
+    .args(["route", "show", &vpn_server.to_string()])
+    .output()?;
+
+        if check.status.success() && !check.stdout.is_empty() {
+            println!("ℹ️ Маршрут до VPN-сервера {} уже существует, пропускаем", vpn_server);
+            return Ok(());
+        }
+
+        // Если нет — добавляем
         let status = Command::new("ip")
             .args([
                 "route",
@@ -186,6 +197,7 @@ impl AsyncTun {
             return Err("Failed to add route to VPN server".into());
         }
 
+        println!("✅ Добавлен маршрут до VPN-сервера {}", vpn_server);
         Ok(())
     }
 

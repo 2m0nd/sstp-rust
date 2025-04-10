@@ -554,7 +554,7 @@ pub async fn start_tun_forwarding(
     println!("🟢 TUN активен. Запускаем туннелирование...");
     let writer = Arc::new(TokioMutex::new(writer));
 
-    let timeout_duration = Duration::from_millis(200);
+    let timeout_duration = Duration::from_millis(1);
     let (tun_sender, mut tun_receiver) = 
         tokio::sync::mpsc::channel::<Vec<u8>>(1000 * 30);
     let (sstp_sender, mut sstp_receiver) = 
@@ -601,14 +601,14 @@ pub async fn start_tun_forwarding(
                                 Err(e) => eprintln!("❌ Ошибка отправки в канал: {e}"),
                             }
                         }
-                        Err(_would_block) => {
-                            continue;
-                        }
                         Ok(Err(e)) => {
-                            eprintln!("❌ Ошибка чтения из TUN: {e}");
+                            if e.kind() != std::io::ErrorKind::WouldBlock {
+                                eprintln!("❌ Ошибка чтения из TUN: {e}");
+                            }
+                            // иначе — просто молча пропускаем
                         }
                         Err(_) => {
-                            eprintln!("❌ Тайм-аут при чтении из TUN.");
+                            //eprintln!("❌ Тайм-аут при чтении из TUN.");
                         }
                     }
                     tokio::task::yield_now().await;
@@ -709,7 +709,7 @@ pub async fn start_tun_forwarding(
                             eprintln!("❌ Ошибка чтения из SSTP: {e}");
                         }
                         Err(_) => {
-                            eprintln!("❌ Тайм-аут при чтении из SSTP.");
+                            //eprintln!("❌ Тайм-аут при чтении из SSTP.");
                         }
                     }
                     tokio::task::yield_now().await;
