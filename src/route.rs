@@ -4,7 +4,7 @@ use std::process::Command;
 pub fn config_routes(vpn_server: Ipv4Addr) -> Result<(), Box<dyn std::error::Error>>   {
 
     // добавить роут до vpn server'a чере маршрутизатор
-    //sudo route add -host SSTP_SERVER_IP_ADDRESS 192.168.1.1
+    //sudo route add -host REMOVED_IP 192.168.1.1
     let status = Command::new("route")
     .args([
        "add",

@@ -20,11 +20,7 @@ use tokio_util::sync::CancellationToken;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
-    dotenv()?; // ← читаем .env
-    
-    let server_ip = env::var("SSTP_SERVER")?;
-    let user = env::var("SSTP_USER")?;
-    let pwd = env::var("SSTP_PASSWORD")?;
+    let (server_ip, user, pwd) = get_credentials().expect("Not allowed parameters");
     
     let ssl_addr = format!("{server_ip}:443");
 
@@ -79,4 +75,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+
+pub fn get_credentials() -> Result<(String, String, String), Box<dyn std::error::Error>> {
+    let args: Vec<String> = env::args().collect();
+    match args.as_slice() {
+        // Case 1: useEnv
+        [_, mode] if mode == "useEnv" => {
+            dotenv()?; // ← читаем .env
+            let server = env::var("SSTP_SERVER")?;
+            let user = env::var("SSTP_USER")?;
+            let password = env::var("SSTP_PASSWORD")?;
+            Ok((server, user, password))
+        }
+
+        // Case 2: useInline server user password
+        [_, mode, server, user, password] if mode == "useInline" => {
+            Ok((server.clone(), user.clone(), password.clone()))
+        }
+
+        // Anything else
+        _ => Err("Please either use 'useEnv' with environment variables or 'useInline <server> <user> <password>'".into()),
+    }
 }
