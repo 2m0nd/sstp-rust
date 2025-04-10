@@ -601,6 +601,9 @@ pub async fn start_tun_forwarding(
                                 Err(e) => eprintln!("❌ Ошибка отправки в канал: {e}"),
                             }
                         }
+                        Err(_would_block) => {
+                            continue;
+                        }
                         Ok(Err(e)) => {
                             eprintln!("❌ Ошибка чтения из TUN: {e}");
                         }

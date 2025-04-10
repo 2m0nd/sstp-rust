@@ -2,12 +2,15 @@ use std::{
     fs::File,
     io::{Read, Write},
     net::Ipv4Addr,
-    os::fd::FromRawFd,
-    os::unix::io::AsRawFd,
+    os::{fd::{FromRawFd, IntoRawFd}, unix::io::AsRawFd},
     process::Command,
     sync::Arc,
 };
-
+use std::os::unix::io::RawFd;
+use libc::{c_short, ifreq, IFF_NO_PI, IFF_TUN, TUNSETIFF};
+use std::ffi::CString;
+use std::io;
+use std::mem;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::Mutex;
 
@@ -41,7 +44,8 @@ impl AsyncTun {
         Self::add_default_route(&ifname)?;
 
         // Открываем устройство /dev/net/tun
-        let file = File::open("/dev/net/tun")?;
+        let fd = Self::open_tun_fd(&ifname)?;
+        let file = unsafe { File::from_raw_fd(fd) };
         let async_fd = AsyncFd::new(file)?;
 
         Ok(Self {
@@ -49,6 +53,42 @@ impl AsyncTun {
             read_buf: Arc::new(Mutex::new([0u8; 1504])),
             ifname,
         })
+    }
+
+
+    fn open_tun_fd(ifname: &str) -> io::Result<RawFd> {
+        use std::os::unix::prelude::OpenOptionsExt;
+        use std::fs::OpenOptions;
+
+        let fd = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open("/dev/net/tun")?
+            .into_raw_fd();
+
+        let mut req = ifreq {
+            ifr_name: [0; libc::IFNAMSIZ],
+            ifr_ifru: unsafe { mem::zeroed() },
+        };
+
+        // Копируем имя интерфейса в ifr_name
+        let ifname_c = CString::new(ifname).unwrap();
+        for (i, b) in ifname_c.as_bytes().iter().enumerate() {
+            req.ifr_name[i] = *b as libc::c_char;
+        }
+
+        // Устанавливаем флаги IFF_TUN | IFF_NO_PI
+        unsafe {
+            req.ifr_ifru.ifru_flags = (libc::IFF_TUN | libc::IFF_NO_PI) as libc::c_short;
+
+            let res = libc::ioctl(fd, TUNSETIFF, &req);
+            if res < 0 {
+                return Err(io::Error::last_os_error());
+            }
+        }
+
+        Ok(fd)
     }
 
     pub fn delete(ifname: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
