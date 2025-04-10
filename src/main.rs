@@ -2,7 +2,6 @@ use sstp_rust::sstp_state_machine::*;
 use sstp_rust::DEBUG_PARSE;
 use sstp_rust::types::*;
 use sstp_rust::tools::*;
-use sstp_rust::ssl_verifiers::PinnedCertVerifier;
 
 use std::net::Ipv4Addr;
 use anyhow::Result;
@@ -20,7 +19,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Start vpn client...");
 
-    let (server_ip, user, pwd, ssl_cert_fingerprint) = get_credentials().expect("Not allowed parameters");
+    let (server_ip, user, pwd, ssl_cert_fingerprint) = 
+    get_credentials().expect("Not allowed parameters");
     
     let ssl_addr = format!("{server_ip}:443");
 
@@ -28,11 +28,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let domain = ServerName::IpAddress(server_ip.parse::<IpAddr>()?);
 
-    let fingerprint = parse_sha256_hex(&ssl_cert_fingerprint)?;
+    let verifier = make_verifier(&ssl_cert_fingerprint);
 
     let config = ClientConfig::builder()
         .with_safe_defaults()
-        .with_custom_certificate_verifier(Arc::new(PinnedCertVerifier::new(fingerprint)))
+        .with_custom_certificate_verifier(verifier)
         .with_no_client_auth();
 
     let connector = TlsConnector::from(Arc::new(config));
