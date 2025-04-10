@@ -583,7 +583,17 @@ pub async fn start_tun_forwarding(
                     
                     match result {
                         Ok(Ok(buf)) => {
-                            let ip_data = &buf[4..buf.len()]; // пропускаем 4 байта заголовка macOS TUN
+                            let ip_data = {
+                                #[cfg(target_os = "macos")]
+                                {
+                                    &buf[4..] // пропускаем 4 байта заголовка macOS TUN
+                                }
+                            
+                                #[cfg(not(target_os = "macos"))]
+                                {
+                                    &buf[..]
+                                }
+                            };
                             let packet = wrap_ip_in_ppp_sstp(&ip_data);
                             //println!("📥 tun read packet size {} time: {} µs", packet.len(), tun_timer.elapsed().as_millis());
                             match tun_sender.send(packet).await {
@@ -671,9 +681,20 @@ pub async fn start_tun_forwarding(
     
                             if let Some(ip_data) = parse_ppp_ip_packet(&buf[..n]) {
                                 let ip_data = ip_data.to_vec(); // выделяем для send в blocking
-                                let mut buf = Vec::with_capacity(4 + ip_data.len()); //apple header ip
-                                buf.extend_from_slice(&[0x00, 0x00, 0x00, 0x02]); // AF_INET
-                                buf.extend_from_slice(&ip_data); // сам IP-пакет
+                                let mut buf = {
+                                    #[cfg(target_os = "macos")]
+                                    {
+                                        let mut b = Vec::with_capacity(4 + ip_data.len());
+                                        b.extend_from_slice(&[0x00, 0x00, 0x00, 0x02]); // AF_INET
+                                        b.extend_from_slice(&ip_data);
+                                        b
+                                    }
+                                
+                                    #[cfg(not(target_os = "macos"))]
+                                    {
+                                        ip_data.to_vec()
+                                    }
+                                };
     
                                 match sstp_sender.send(buf).await {
                                     Ok(_) => (),
