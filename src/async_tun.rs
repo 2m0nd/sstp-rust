@@ -31,7 +31,7 @@ impl AsyncTun {
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         println!("🚀 AsyncTun::new()");
         config_routes(vpn_server).expect("Expect ok.");
-        let (ifname, raw_fd) = Self::init_tun_interface().expect("Failed to init TUN interface");;
+        let (ifname, raw_fd) = Self::init_tun_interface().expect("Failed to init TUN interface");
         Self::setup_ip(address, destination, netmask, ifname.clone()).expect("Failed setup ip for TUN interface");
         let file = unsafe { File::from_raw_fd(raw_fd) };
         let async_fd = AsyncFd::new(file)?;

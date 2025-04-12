@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::str::FromStr;
 use tokio::time::{Duration, timeout};
-use std::io::Write;
 use std::net::Ipv4Addr;
 use anyhow::Result;
 use crate::log::*;
@@ -67,7 +66,6 @@ pub async fn run_sstm_state_machine(
     let n = stream.read(&mut buf).await?;
     println!("📥 Ответ на Hello ({} байт): {:02X?}", n, &buf[..n]);
 
-    let buf = [0u8; 1500];
     let mut state = PppState::SendLcpRequest;
     let mut id_counter: u8 = 0;
 
