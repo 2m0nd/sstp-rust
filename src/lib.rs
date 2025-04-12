@@ -1,6 +1,5 @@
 pub mod sstp;
 pub mod log;
-pub mod route;
 pub mod sstp_state_machine;
 pub mod types;
 pub mod parser;

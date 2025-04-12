@@ -7,7 +7,6 @@ use crate::parser::PppParsedFrame;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 
-
 pub async fn read_and_parse_all<R: AsyncRead + Unpin>(
     stream: &mut R,
     leftover: &mut Vec<u8>,
@@ -48,7 +47,6 @@ pub async fn read_and_parse_all<R: AsyncRead + Unpin>(
     Ok(())
 }
 
-
 pub fn take_matching_packet<F>(
     queue: &mut VecDeque<PppParsedFrame>,
     matcher: F,
@@ -88,35 +86,6 @@ fn extract_ppp_from_sstp_stream(leftover: &mut Vec<u8>) -> Vec<PppParsedFrame> {
     leftover.drain(0..offset);
     parsed
 }
-
-
-fn parse_all_ppp_packets(buf: &mut Vec<u8>) -> Vec<PppParsedFrame> {
-    let mut packets = Vec::new();
-    let mut i = 0;
-
-    while i + 4 <= buf.len() {
-        if buf[i] != 0x10 || buf[i + 1] != 0x00 {
-            i += 1;
-            continue;
-        }
-
-        let total_len = u16::from_be_bytes([buf[i + 2], buf[i + 3]]) as usize;
-        if i + total_len > buf.len() {
-            break; // ждём больше данных
-        }
-
-        let payload = &buf[i + 4..i + total_len];
-        if let Some(ppp) = parse_ppp_frame(payload) {
-            packets.push(ppp);
-        }
-
-        i += total_len;
-    }
-
-    buf.drain(..i); // убираем использованное
-    packets
-}
-
 
 pub fn build_sstp_hello(correlation_id: Uuid) -> Vec<u8> {
     let hello = vec![
@@ -319,7 +288,6 @@ pub fn build_configure_nak_from_request(sstp_payload: &[u8]) -> Option<Vec<u8>> 
 
     Some(sstp)
 }
-
 
 pub fn is_lcp_configure_request(buf: &[u8]) -> bool {
     buf.len() >= 12 &&
@@ -658,6 +626,7 @@ pub fn parse_ppp_ip_packet(buf: &[u8]) -> Option<&[u8]> {
         None
     }
 }
+
 pub fn extract_all_lcp_option_types(payload: &[u8]) -> Vec<u8> {
     let mut i = 0;
     let mut types = Vec::new();
@@ -674,6 +643,7 @@ pub fn extract_all_lcp_option_types(payload: &[u8]) -> Vec<u8> {
     }
     types
 }
+
 pub fn build_lcp_configure_request_filtered(id: u8, reject_list: &[u8]) -> Vec<u8> {
     let mut payload = Vec::new();
 
@@ -695,7 +665,6 @@ pub fn build_lcp_configure_request_filtered(id: u8, reject_list: &[u8]) -> Vec<u
 
     wrap_lcp_packet(0x01, id, &payload)
 }
-
 
 pub fn remove_rejected_lcp_options(payload: &[u8], rejected: &[u8]) -> Vec<u8> {
     let mut result = Vec::new();
@@ -863,7 +832,6 @@ pub fn remove_rejected_ipcp_options(payload: &[u8], rejected_types: &[u8]) -> Ve
 
     filtered
 }
-
 
 pub fn extract_all_ipcp_option_types(payload: &[u8]) -> Vec<u8> {
     let mut result = Vec::new();

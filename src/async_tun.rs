@@ -1,4 +1,3 @@
-use route::*;
 use std::{
     fs::File,
     io::{Read, Write},
@@ -12,8 +11,6 @@ use tokio::io::unix::AsyncFd;
 use tokio::sync::Mutex;
 
 use nix::libc::{sockaddr_ctl, ctl_info, AF_SYSTEM, AF_SYS_CONTROL, SYSPROTO_CONTROL};
-
-use crate::route;
 
 #[derive(Clone)]
 pub struct AsyncTun {
@@ -228,4 +225,34 @@ impl AsyncTun {
         Ok(())
     }
 
+}
+
+pub fn config_routes(vpn_server: Ipv4Addr) -> Result<(), Box<dyn std::error::Error>>   {
+
+    // добавить роут до vpn server'a чере маршрутизатор
+    //sudo route add -host SSTP_SERVER 192.168.1.1
+    let status = Command::new("route")
+    .args([
+       "add",
+        "-host",
+        &vpn_server.to_string(),
+        "192.168.1.1"
+    ])
+    .status()?;
+   if !status.success() {
+       return Err("add route failed to configure utun".into());
+   }
+   //sudo route -n delete -net default
+    let status = Command::new("route")
+    .args([
+       "-n",
+        "delete",
+        "-net",
+        "default"
+    ])
+    .status()?;
+   if !status.success() {
+       return Err("error remove default route".into());
+   }
+   Ok(())
 }
